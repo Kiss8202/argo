@@ -479,20 +479,24 @@ while true; do
     menu=${menu:-0}
     case $menu in
         1)
-            clear
-            while true; do
-                /opt/argo/cloudflared-linux tunnel list
-                echo "1. 删除隧道  0. 返回"
-                read -p "选择: " ta
-                if [ "$ta" = "1" ]; then
-                    read -p "隧道名: " tn
-                    /opt/argo/cloudflared-linux tunnel cleanup "$tn"
-                    /opt/argo/cloudflared-linux tunnel delete "$tn"
-                else
-                    break
-                fi
-            done
-            ;;
+    clear
+    while true; do
+        echo "ARGO TUNNEL 列表："
+        /opt/argo/cloudflared-linux tunnel list 2>/dev/null | tail -n +3
+        echo ""
+        echo "1. 删除隧道  0. 返回"
+        read -p "选择: " ta
+        if [ "$ta" = "1" ]; then
+            read -p "隧道名: " tn
+            /opt/argo/cloudflared-linux tunnel cleanup "$tn" >/dev/null 2>&1
+            /opt/argo/cloudflared-linux tunnel delete "$tn" >/dev/null 2>&1
+            echo "已删除隧道 $tn"
+            sleep 1
+        else
+            break
+        fi
+    done
+    ;;
         2)
             if [ -f /etc/alpine-release ]; then
                 kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
