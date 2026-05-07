@@ -449,7 +449,7 @@ EOF
         systemctl start argo-cloudflared.service argo-core.service
     fi
 
-    # 管理脚本
+        # 管理脚本
     cat > /opt/argo/argo-manager.sh <<'MANAGER'
 #!/bin/bash
 CT=$(cat /opt/argo/core_type 2>/dev/null || echo "xray")
@@ -492,7 +492,6 @@ while true; do
             ;;
         2)
             if [ -f /etc/alpine-release ]; then
-                # 彻底重启：先杀死所有相关进程，再重新启动监控
                 kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
                 kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
                 pkill -f "argo-cloudflared.start" 2>/dev/null
@@ -517,7 +516,6 @@ while true; do
             ;;
         4)
             if [ -f /etc/alpine-release ]; then
-                # 重启 = 停止 + 启动
                 kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
                 kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
                 pkill -f "argo-cloudflared.start" 2>/dev/null
