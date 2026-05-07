@@ -377,43 +377,66 @@ ingress:
     service: http://localhost:$port
 EOF
 
-        # 自启服务 (Alpine 增加保活监控)
+           # 自启服务 (Alpine 使用 supervise-daemon 守护，稳定可靠)
     if is_alpine; then
-        # cloudflared 保活启动脚本（注意：此处无引号，确保变量展开）
-        cat > /etc/local.d/argo-cloudflared.start <<KEEPALIVE
-#!/bin/sh
-(
-  while true; do
-    if ! ps -ef | grep -v grep | grep -q "cloudflared-linux"; then
-      /opt/argo/cloudflared-linux --edge-ip-version $ips --protocol http2 tunnel --config /opt/argo/config.yaml run $name >/dev/null 2>&1 &
-    fi
-    sleep 10
-  done
-) &
-KEEPALIVE
-        # 核心保活启动脚本
-        cat > /etc/local.d/argo-core.start <<KEEPALIVE2
-#!/bin/sh
-(
-  while true; do
-    if [ "$core_type" = "xray" ]; then
-      if ! ps -ef | grep -v grep | grep -q "xray"; then
-        /opt/argo/xray run -config /opt/argo/config.json >/dev/null 2>&1 &
-      fi
-    else
-      if ! ps -ef | grep -v grep | grep -q "sing-box"; then
-        /opt/argo/sing-box run -c /opt/argo/config.json >/dev/null 2>&1 &
-      fi
-    fi
-    sleep 10
-  done
-) &
-KEEPALIVE2
-        chmod +x /etc/local.d/argo-cloudflared.start /etc/local.d/argo-core.start
-        rc-update add local
-        # 启动监控及进程（隐藏输出）
-        /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
-        /etc/local.d/argo-core.start >/dev/null 2>&1
+        # 确保 cgroups 服务已启用（supervise-daemon 依赖）
+        rc-update add cgroups default >/dev/null 2>&1
+        rc-service cgroups start >/dev/null 2>&1
+
+        # 创建 cloudflared OpenRC 服务脚本
+        cat > /etc/init.d/argo-cloudflared <<EOF
+#!/sbin/openrc-run
+name="argo-cloudflared"
+description="Cloudflare Tunnel for argo"
+
+command="/opt/argo/cloudflared-linux"
+command_args="--edge-ip-version $ips --protocol http2 tunnel --config /opt/argo/config.yaml run $name"
+pidfile="/run/\${name}.pid"
+required_files="/opt/argo/config.yaml"
+command_background=true
+
+supervisor="supervise-daemon"
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+        chmod +x /etc/init.d/argo-cloudflared
+
+        # 创建核心 OpenRC 服务脚本
+        cat > /etc/init.d/argo-core <<EOF
+#!/sbin/openrc-run
+name="argo-core"
+description="${core_type} core for argo"
+
+command="/opt/argo/$core_type"
+$([ "$core_type" = "xray" ] && echo 'command_args="run -config /opt/argo/config.json"' || echo 'command_args="run -c /opt/argo/config.json"')
+pidfile="/run/\${name}.pid"
+required_files="/opt/argo/config.json"
+command_background=true
+
+supervisor="supervise-daemon"
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after firewall
+}
+EOF
+        chmod +x /etc/init.d/argo-core
+
+        # 启用并启动服务（隐藏日志输出）
+        rc-update add argo-cloudflared default
+        rc-update add argo-core default
+        rc-service argo-cloudflared start >/dev/null 2>&1
+        rc-service argo-core start >/dev/null 2>&1
+
+        # 删除旧版 local.d 脚本（如果存在）
+        rm -f /etc/local.d/argo-cloudflared.start /etc/local.d/argo-core.start 2>/dev/null
     else
         # systemd 配置（已自带 Restart=on-failure 保活）
         cat > /etc/systemd/system/argo-cloudflared.service <<EOF
@@ -453,16 +476,14 @@ EOF
     fi
 
         # 管理脚本
-        cat > /opt/argo/argo-manager.sh <<'MANAGER'
+            cat > /opt/argo/argo-manager.sh <<'MANAGER'
 #!/bin/bash
 CT=$(cat /opt/argo/core_type 2>/dev/null || echo "xray")
 clear
 while true; do
     if [ -f /etc/alpine-release ]; then
-        cstat=$(ps -ef | grep cloudflared-linux | grep -v grep | wc -l)
-        xstat=$(ps -ef | grep -E "xray|sing-box" | grep -v grep | wc -l)
-        [ $cstat -gt 0 ] && cstat="running" || cstat="stop"
-        [ $xstat -gt 0 ] && xstat="running" || xstat="stop"
+        cstat=$(rc-service argo-cloudflared status 2>/dev/null | grep -q "started" && echo "running" || echo "stop")
+        xstat=$(rc-service argo-core status 2>/dev/null | grep -q "started" && echo "running" || echo "stop")
     else
         cstat=$(systemctl is-active argo-cloudflared.service)
         xstat=$(systemctl is-active argo-core.service)
@@ -479,32 +500,28 @@ while true; do
     menu=${menu:-0}
     case $menu in
         1)
-    clear
-    while true; do
-        echo "ARGO TUNNEL 列表："
-        /opt/argo/cloudflared-linux tunnel list 2>/dev/null | tail -n +3
-        echo ""
-        echo "1. 删除隧道  0. 返回"
-        read -p "选择: " ta
-        if [ "$ta" = "1" ]; then
-            read -p "隧道名: " tn
-            /opt/argo/cloudflared-linux tunnel cleanup "$tn" >/dev/null 2>&1
-            /opt/argo/cloudflared-linux tunnel delete "$tn" >/dev/null 2>&1
-            echo "已删除隧道 $tn"
-            sleep 1
-        else
-            break
-        fi
-    done
-    ;;
+            clear
+            while true; do
+                echo "ARGO TUNNEL 列表："
+                /opt/argo/cloudflared-linux tunnel list 2>/dev/null | tail -n +3
+                echo ""
+                echo "1. 删除隧道  0. 返回"
+                read -p "选择: " ta
+                if [ "$ta" = "1" ]; then
+                    read -p "隧道名: " tn
+                    /opt/argo/cloudflared-linux tunnel cleanup "$tn" >/dev/null 2>&1
+                    /opt/argo/cloudflared-linux tunnel delete "$tn" >/dev/null 2>&1
+                    echo "已删除隧道 $tn"
+                    sleep 1
+                else
+                    break
+                fi
+            done
+            ;;
         2)
             if [ -f /etc/alpine-release ]; then
-                kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
-                kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
-                pkill -f "argo-cloudflared.start" 2>/dev/null
-                pkill -f "argo-core.start" 2>/dev/null
-                /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
-                /etc/local.d/argo-core.start >/dev/null 2>&1
+                rc-service argo-cloudflared start >/dev/null 2>&1
+                rc-service argo-core start >/dev/null 2>&1
             else
                 systemctl start argo-cloudflared.service argo-core.service
             fi
@@ -512,10 +529,8 @@ while true; do
             ;;
         3)
             if [ -f /etc/alpine-release ]; then
-                kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
-                kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
-                pkill -f "argo-cloudflared.start" 2>/dev/null
-                pkill -f "argo-core.start" 2>/dev/null
+                rc-service argo-cloudflared stop >/dev/null 2>&1
+                rc-service argo-core stop >/dev/null 2>&1
             else
                 systemctl stop argo-cloudflared.service argo-core.service
             fi
@@ -523,12 +538,8 @@ while true; do
             ;;
         4)
             if [ -f /etc/alpine-release ]; then
-                kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
-                kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
-                pkill -f "argo-cloudflared.start" 2>/dev/null
-                pkill -f "argo-core.start" 2>/dev/null
-                /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
-                /etc/local.d/argo-core.start >/dev/null 2>&1
+                rc-service argo-cloudflared restart >/dev/null 2>&1
+                rc-service argo-core restart >/dev/null 2>&1
             else
                 systemctl restart argo-cloudflared.service argo-core.service
             fi
@@ -536,11 +547,11 @@ while true; do
             ;;
         5)
             if [ -f /etc/alpine-release ]; then
-                kill -9 $(ps -ef | grep cloudflared-linux | grep -v grep | awk '{print $1}') 2>/dev/null
-                kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
-                pkill -f "argo-cloudflared.start" 2>/dev/null
-                pkill -f "argo-core.start" 2>/dev/null
-                rc-update delete local
+                rc-service argo-cloudflared stop >/dev/null 2>&1
+                rc-service argo-core stop >/dev/null 2>&1
+                rc-update del argo-cloudflared default
+                rc-update del argo-core default
+                rm -f /etc/init.d/argo-cloudflared /etc/init.d/argo-core
             else
                 systemctl stop argo-cloudflared.service argo-core.service
                 systemctl disable argo-cloudflared.service argo-core.service
