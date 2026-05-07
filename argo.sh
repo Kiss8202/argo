@@ -453,7 +453,7 @@ EOF
     fi
 
         # 管理脚本
-    cat > /opt/argo/argo-manager.sh <<'MANAGER'
+        cat > /opt/argo/argo-manager.sh <<'MANAGER'
 #!/bin/bash
 CT=$(cat /opt/argo/core_type 2>/dev/null || echo "xray")
 clear
@@ -499,8 +499,8 @@ while true; do
                 kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
                 pkill -f "argo-cloudflared.start" 2>/dev/null
                 pkill -f "argo-core.start" 2>/dev/null
-                /etc/local.d/argo-cloudflared.start
-                /etc/local.d/argo-core.start
+                /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
+                /etc/local.d/argo-core.start >/dev/null 2>&1
             else
                 systemctl start argo-cloudflared.service argo-core.service
             fi
@@ -523,8 +523,8 @@ while true; do
                 kill -9 $(ps -ef | grep -E "xray|sing-box" | grep -v grep | awk '{print $1}') 2>/dev/null
                 pkill -f "argo-cloudflared.start" 2>/dev/null
                 pkill -f "argo-core.start" 2>/dev/null
-                /etc/local.d/argo-cloudflared.start
-                /etc/local.d/argo-core.start
+                /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
+                /etc/local.d/argo-core.start >/dev/null 2>&1
             else
                 systemctl restart argo-cloudflared.service argo-core.service
             fi
