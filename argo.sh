@@ -66,6 +66,7 @@ gen_vmess_link() {
 }
 
 # 下载并准备核心（根据 core_type 和架构，从官方 API 获取最新版本）
+# 下载并准备核心（根据 core_type 和架构，从官方 API 获取最新版本）
 download_core() {
     local arch=$(uname -m)
     local download_dir="${1:-.}"
@@ -77,7 +78,8 @@ download_core() {
             echo "xray 已存在，跳过下载"
             return
         fi
-        local latest_tag=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep -o '"tag_name": ".*"' | cut -d'"' -f4)
+        # 从 GitHub API 获取最新 tag（修复解析方式）
+        local latest_tag=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest | grep '"tag_name"' | tr ',' '\n' | grep '"tag_name"' | sed 's/.*: "\(.*\)".*/\1/')
         if [ -z "$latest_tag" ]; then
             echo "无法获取 xray 最新版本，请检查网络"
             exit 1
@@ -104,7 +106,8 @@ download_core() {
             echo "sing-box 已存在，跳过下载"
             return
         fi
-        local latest_tag=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -o '"tag_name": ".*"' | cut -d'"' -f4)
+        # 从 GitHub API 获取最新 tag（修复解析方式）
+        local latest_tag=$(curl -sL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | tr ',' '\n' | grep '"tag_name"' | sed 's/.*: "\(.*\)".*/\1/')
         if [ -z "$latest_tag" ]; then
             echo "无法获取 sing-box 最新版本，请检查网络"
             exit 1
