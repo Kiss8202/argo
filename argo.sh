@@ -377,7 +377,7 @@ ingress:
     service: http://localhost:$port
 EOF
 
-    # 自启服务 (Alpine 增加保活监控)
+        # 自启服务 (Alpine 增加保活监控)
     if is_alpine; then
         # cloudflared 保活启动脚本（注意：此处无引号，确保变量展开）
         cat > /etc/local.d/argo-cloudflared.start <<KEEPALIVE
@@ -385,7 +385,7 @@ EOF
 (
   while true; do
     if ! ps -ef | grep -v grep | grep -q "cloudflared-linux"; then
-      /opt/argo/cloudflared-linux --edge-ip-version $ips --protocol http2 tunnel --config /opt/argo/config.yaml run $name &
+      /opt/argo/cloudflared-linux --edge-ip-version $ips --protocol http2 tunnel --config /opt/argo/config.yaml run $name >/dev/null 2>&1 &
     fi
     sleep 10
   done
@@ -398,11 +398,11 @@ KEEPALIVE
   while true; do
     if [ "$core_type" = "xray" ]; then
       if ! ps -ef | grep -v grep | grep -q "xray"; then
-        /opt/argo/xray run -config /opt/argo/config.json &
+        /opt/argo/xray run -config /opt/argo/config.json >/dev/null 2>&1 &
       fi
     else
       if ! ps -ef | grep -v grep | grep -q "sing-box"; then
-        /opt/argo/sing-box run -c /opt/argo/config.json &
+        /opt/argo/sing-box run -c /opt/argo/config.json >/dev/null 2>&1 &
       fi
     fi
     sleep 10
@@ -411,9 +411,9 @@ KEEPALIVE
 KEEPALIVE2
         chmod +x /etc/local.d/argo-cloudflared.start /etc/local.d/argo-core.start
         rc-update add local
-        # 启动监控及进程
-        /etc/local.d/argo-cloudflared.start
-        /etc/local.d/argo-core.start
+        # 启动监控及进程（隐藏输出）
+        /etc/local.d/argo-cloudflared.start >/dev/null 2>&1
+        /etc/local.d/argo-core.start >/dev/null 2>&1
     else
         # systemd 配置（已自带 Restart=on-failure 保活）
         cat > /etc/systemd/system/argo-cloudflared.service <<EOF
