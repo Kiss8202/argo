@@ -565,95 +565,111 @@ MANAGER
 }
 
 # ---------- 主菜单 ----------
-clear
-echo "       _       _                              _                "
-echo "      | |     | |       ___   _   _    ___   | |__     ____       "
-echo "    __| |_____| |_     / __| | | | |  / _ \  | |_ \   / _  |   "
-echo "   |__   ______  _|    \__ \ | |_| | | (_) | | | | | | (_| | "
-echo "      | |_    | |_     |___/  \___/   \___/  |_| |_|  \____|"
-echo "       \__|    \__|"
-echo ""
-echo "欢迎使用 TT Agro-argo 一键梭哈脚本"
-echo "-------------------------------------------"
-echo "1. 梭哈模式（无需域名，重启失效）"
-echo "2. 安装服务（需要 CF 域名，重启不失效）"
-echo "3. 卸载服务"
-echo "4. 管理服务"
-echo "5. 清空缓存"
-echo "0. 退出"
-read -p "选择 (默认1): " mode
-mode=${mode:-1}
+while true; do
+    clear
+    echo "       _       _                              _                "
+    echo "      | |     | |       ___   _   _    ___   | |__     ____       "
+    echo "    __| |_____| |_     / __| | | | |  / _ \  | |_ \   / _  |   "
+    echo "   |__   ______  _|    \__ \ | |_| | | (_) | | | | | | (_| | "
+    echo "      | |_    | |_     |___/  \___/   \___/  |_| |_|  \____|"
+    echo "       \__|    \__|"
+    echo ""
+    echo "欢迎使用 TT Agro-argo 一键梭哈脚本"
+    echo "-------------------------------------------"
+    echo "1. 梭哈模式（无需域名，重启失效）"
+    echo "2. 安装服务（需要 CF 域名，重启不失效）"
+    echo "3. 卸载服务"
+    echo "4. 管理服务"
+    echo "5. 清空缓存"
+    echo "0. 退出"
+    read -p "选择 (默认1): " mode
+    mode=${mode:-1}
 
-if [ "$mode" == "2" ]; then
-    if [ -f /usr/bin/argo ]; then
-        echo "服务已安装，跳转管理..."
-        argo
-        exit 0
-    fi
-fi
-
-if [ "$mode" == "1" ] || [ "$mode" == "2" ]; then
-    read -p "选择核心 (1.xray, 2.sing-box, 默认1): " core_choice
-    core_choice=${core_choice:-1}
-    if [ "$core_choice" == "1" ]; then
-        core_type="xray"
-    elif [ "$core_choice" == "2" ]; then
-        core_type="sing-box"
-    else
-        echo "核心选择错误"; exit 1
-    fi
-
-    read -p "协议 (1.vmess, 2.vless, 默认1): " protocol
-    protocol=${protocol:-1}
-    [ "$protocol" != "1" ] && [ "$protocol" != "2" ] && { echo "协议错误"; exit 1; }
-
-    read -p "IP 版本 (4 或 6, 默认4): " ips
-    ips=${ips:-4}
-    [ "$ips" != "4" ] && [ "$ips" != "6" ] && { echo "IP 版本错误"; exit 1; }
-
-    isp=$(curl -$ips -s https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18"-"$30}' | sed 's/ /_/g')
-fi
-
-case $mode in
-    1)
-        cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
-        rm -rf xray cloudflared-linux v2ray.txt /tmp/sing-box 2>/dev/null
-        quicktunnel
-        ;;
-    2)
-        cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
-        installtunnel
-        ;;
-    3)
-        if is_alpine; then
-            kill -9 $(ps -ef | grep -E "xray|sing-box|cloudflared" | grep -v grep | awk '{print $1}') 2>/dev/null
-            pkill -f "argo-cloudflared.start" 2>/dev/null
-            pkill -f "argo-core.start" 2>/dev/null
-            rm -rf /opt/argo /usr/bin/argo /etc/local.d/argo-*
-        else
-            systemctl stop argo-cloudflared.service argo-core.service 2>/dev/null
-            systemctl disable argo-cloudflared.service argo-core.service 2>/dev/null
-            rm -rf /opt/argo /usr/bin/argo /etc/systemd/system/argo-* ~/.cloudflared
-            systemctl daemon-reload
-        fi
-        echo "卸载完成"
-        ;;
-    4)
+    if [ "$mode" == "2" ]; then
         if [ -f /usr/bin/argo ]; then
+            echo "服务已安装，跳转管理..."
             argo
-        else
-            echo "请先安装服务 (模式2)"
+            continue
         fi
-        ;;
-    5)
-        cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
-        rm -rf xray cloudflared-linux v2ray.txt
-        echo "缓存已清空"
-        ;;
-    0)
-        echo "退出"; exit 0
-        ;;
-    *)
-        echo "无效输入"; exit 1
-        ;;
-esac
+    fi
+
+    if [ "$mode" == "1" ] || [ "$mode" == "2" ]; then
+        read -p "选择核心 (1.xray, 2.sing-box, 默认1): " core_choice
+        core_choice=${core_choice:-1}
+        if [ "$core_choice" == "1" ]; then
+            core_type="xray"
+        elif [ "$core_choice" == "2" ]; then
+            core_type="sing-box"
+        else
+            echo "核心选择错误"
+            read -p "按回车继续..." _
+            continue
+        fi
+
+        read -p "协议 (1.vmess, 2.vless, 默认1): " protocol
+        protocol=${protocol:-1}
+        if [ "$protocol" != "1" ] && [ "$protocol" != "2" ]; then
+            echo "协议错误"
+            read -p "按回车继续..." _
+            continue
+        fi
+
+        read -p "IP 版本 (4 或 6, 默认4): " ips
+        ips=${ips:-4}
+        if [ "$ips" != "4" ] && [ "$ips" != "6" ]; then
+            echo "IP 版本错误"
+            read -p "按回车继续..." _
+            continue
+        fi
+
+        isp=$(curl -$ips -s https://speed.cloudflare.com/meta | awk -F\" '{print $26"-"$18"-"$30}' | sed 's/ /_/g')
+    fi
+
+    case $mode in
+        1)
+            cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
+            rm -rf xray cloudflared-linux v2ray.txt /tmp/sing-box 2>/dev/null
+            quicktunnel
+            ;;
+        2)
+            cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
+            installtunnel
+            ;;
+        3)
+            if is_alpine; then
+                kill -9 $(ps -ef | grep -E "xray|sing-box|cloudflared" | grep -v grep | awk '{print $1}') 2>/dev/null
+                pkill -f "argo-cloudflared.start" 2>/dev/null
+                pkill -f "argo-core.start" 2>/dev/null
+                rm -rf /opt/argo /usr/bin/argo /etc/local.d/argo-*
+            else
+                systemctl stop argo-cloudflared.service argo-core.service 2>/dev/null
+                systemctl disable argo-cloudflared.service argo-core.service 2>/dev/null
+                rm -rf /opt/argo /usr/bin/argo /etc/systemd/system/argo-* ~/.cloudflared
+                systemctl daemon-reload
+            fi
+            echo "卸载完成"
+            ;;
+        4)
+            if [ -f /usr/bin/argo ]; then
+                argo
+            else
+                echo "请先安装服务 (模式2)"
+            fi
+            ;;
+        5)
+            cleanup_process xray; cleanup_process sing-box; cleanup_process cloudflared-linux
+            rm -rf xray cloudflared-linux v2ray.txt
+            echo "缓存已清空"
+            ;;
+        0)
+            echo "退出"
+            exit 0
+            ;;
+        *)
+            echo "无效输入"
+            ;;
+    esac
+
+    echo ""
+    read -p "按回车返回主菜单..." _
+done
