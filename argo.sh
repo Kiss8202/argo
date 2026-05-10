@@ -317,7 +317,7 @@ installtunnel() {
     echo "$core_type" > /opt/argo/core_type
 
     clear
-    echo "请浏览器打开以下链接授权 CF 域名："
+    echo -e "\e[1;31m请用浏览器打开以下链接授权 CF 域名：如 example.com\e[0m"
     /opt/argo/cloudflared-linux --edge-ip-version "$ips" --protocol http2 tunnel login
     clear
     /opt/argo/cloudflared-linux --edge-ip-version "$ips" --protocol http2 tunnel list > argo.log 2>&1
