@@ -51,6 +51,10 @@ RELAY_JSONS=()       # 中转JSON配置数组
 RELAY_DESCS=()       # 中转描述数组
 RELAY_FILE="/etc/sing-box/relays.conf"
 
+# 分流规则配置
+DOMAIN_ROUTES=()     # 分流规则数组: 入站标签|匹配类型|匹配值|中转标签|描述
+DOMAIN_ROUTE_FILE="/etc/sing-box/domain_routes.conf"
+
 # 节点数组
 INBOUND_TAGS=()
 INBOUND_PORTS=()
@@ -1056,6 +1060,35 @@ load_relays_from_file() {
             RELAY_JSONS+=("$json")
         fi
     done < "${RELAY_FILE}"
+}
+
+# ==================== 分流规则管理 ====================
+save_domain_routes_to_file() {
+    mkdir -p "$(dirname "${DOMAIN_ROUTE_FILE}")"
+    
+    cat > "${DOMAIN_ROUTE_FILE}" << EOF
+# Sing-box 分流规则配置文件
+# 格式: INBOUND_TAG|MATCH_TYPE|MATCH_VALUE|RELAY_TAG|DESCRIPTION
+# MATCH_TYPE: domain_suffix(域名后缀), domain(完整域名), domain_keyword(关键词), ip_cidr(IP/CIDR)
+EOF
+    
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        echo "$route" >> "${DOMAIN_ROUTE_FILE}"
+    done
+}
+
+load_domain_routes_from_file() {
+    DOMAIN_ROUTES=()
+    
+    if [[ ! -f "${DOMAIN_ROUTE_FILE}" ]]; then
+        return 0
+    fi
+    
+    while IFS= read -r line; do
+        # 跳过注释和空行
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        DOMAIN_ROUTES+=("$line")
+    done < "${DOMAIN_ROUTE_FILE}"
 }
 
 cleanup_links() {
@@ -2798,15 +2831,58 @@ generate_config() {
     done
     outbounds+="]"
     
+    # 加载分流规则
+    load_domain_routes_from_file
+    
     # 构建路由规则
     local route_rules=()
     local has_relay=0
     
-    # 为每个使用中转的节点创建路由规则
+    # 构建入站分流规则映射：inbound_tag -> (分流规则数组)
+    declare -A inbound_has_routes
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        [[ -z "$inbound_tag" || -z "$match_type" || -z "$match_value" || -z "$relay_tag" ]] && continue
+        
+        # 根据匹配类型生成对应的 sing-box 规则
+        local rule_part=""
+        case "$match_type" in
+            domain_suffix)
+                rule_part="\"domain_suffix\":[\"${match_value}\"]"
+                ;;
+            domain)
+                rule_part="\"domain\":[\"${match_value}\"]"
+                ;;
+            domain_keyword)
+                rule_part="\"domain_keyword\":[\"${match_value}\"]"
+                ;;
+            ip_cidr)
+                rule_part="\"ip_cidr\":[\"${match_value}\"]"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        
+        # 生成完整的路由规则（同时匹配入站和分流条件）
+        route_rules+=("{\"inbound\":[\"${inbound_tag}\"],${rule_part},\"outbound\":\"${relay_tag}\"}")
+        inbound_has_routes["$inbound_tag"]=1
+        has_relay=1
+    done
+    
+    # 为每个节点添加默认路由规则
     for i in "${!INBOUND_TAGS[@]}"; do
+        local inbound_tag="${INBOUND_TAGS[$i]}"
         local relay_tag="${INBOUND_RELAY_TAGS[$i]}"
+        
         if [[ "$relay_tag" != "direct" ]]; then
-            route_rules+=("{\"inbound\":[\"${INBOUND_TAGS[$i]}\"],\"outbound\":\"${relay_tag}\"}")
+            # 有分流规则的节点：分流规则匹配不到时走直连
+            if [[ -n "${inbound_has_routes["$inbound_tag"]}" ]]; then
+                route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"direct\"}")
+            else
+                # 没有分流规则的节点：全部走中转（原行为）
+                route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"${relay_tag}\"}")
+            fi
             has_relay=1
         fi
     done
@@ -3167,7 +3243,9 @@ show_main_menu() {
     echo ""
     echo -e "  ${GREEN}[5]${NC} 重新生成链接文件"
     echo ""
-    echo -e "  ${GREEN}[6]${NC} 一键删除脚本并退出"
+    echo -e "  ${GREEN}[6]${NC} 域名分流配置"
+    echo ""
+    echo -e "  ${GREEN}[7]${NC} 一键删除脚本并退出"
     echo ""
     echo -e "  ${GREEN}[0]${NC} 退出脚本"
     echo ""
@@ -3430,6 +3508,216 @@ delete_self() {
     exit 0
 }
 
+# ==================== 域名分流配置菜单 ====================
+domain_route_menu() {
+    while true; do
+        # 加载最新的分流规则、中转和入站配置
+        load_domain_routes_from_file
+        load_relays_from_file
+        
+        show_banner
+        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║              ${GREEN}域名分流配置菜单${CYAN}              ║${NC}"
+        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        
+        # 显示当前的分流规则
+        echo -e "${YELLOW}当前分流规则:${NC}"
+        if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
+            echo "  (暂无分流规则)"
+        else
+            local idx=1
+            for route in "${DOMAIN_ROUTES[@]}"; do
+                IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+                echo -e "  ${GREEN}[${idx}]${NC} 入站: ${inbound_tag} | 匹配: ${match_type}:${match_value} | 中转: ${relay_tag} | ${desc}"
+                ((idx++))
+            done
+        fi
+        echo ""
+        
+        echo -e "  ${GREEN}[1]${NC} 添加分流规则"
+        echo ""
+        echo -e "  ${GREEN}[2]${NC} 删除分流规则"
+        echo ""
+        echo -e "  ${GREEN}[3]${NC} 清空所有分流规则"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 返回主菜单"
+        echo ""
+        
+        read -p "请选择 [0-3]: " dr_choice
+        
+        case $dr_choice in
+            1)
+                add_domain_route
+                ;;
+            2)
+                delete_domain_route
+                ;;
+            3)
+                echo ""
+                echo -e "${YELLOW}此操作将删除所有分流规则！${NC}"
+                read -p "确认清空？(y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    DOMAIN_ROUTES=()
+                    save_domain_routes_to_file
+                    print_success "已清空所有分流规则"
+                    # 重新生成配置
+                    if [[ -n "$INBOUNDS_JSON" ]]; then
+                        generate_config && start_svc
+                    fi
+                fi
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+        echo ""
+        read -p "按回车继续..." _
+    done
+}
+
+add_domain_route() {
+    # 检查是否有入站节点和中转节点
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_error "没有可用的入站节点，请先添加节点"
+        return 1
+    fi
+    if [[ ${#RELAY_TAGS[@]} -eq 0 ]]; then
+        print_error "没有可用的中转节点，请先添加中转"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要配置分流的入站节点:${NC}"
+    local idx=1
+    for i in "${!INBOUND_TAGS[@]}"; do
+        echo -e "  ${GREEN}[${idx}]${NC} ${INBOUND_PROTOS[$i]}:${INBOUND_PORTS[$i]} (${INBOUND_TAGS[$i]})"
+        ((idx++))
+    done
+    echo ""
+    
+    read -p "请选择 [1-$((idx-1))]: " inbound_idx
+    if ! [[ "$inbound_idx" =~ ^[0-9]+$ ]] || [[ "$inbound_idx" -lt 1 ]] || [[ "$inbound_idx" -ge "$idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    ((inbound_idx--))
+    local selected_inbound="${INBOUND_TAGS[$inbound_idx]}"
+    
+    echo ""
+    echo -e "${CYAN}选择匹配类型:${NC}"
+    echo -e "  ${GREEN}[1]${NC} domain_suffix - 域名后缀匹配 (推荐，如 time.is 匹配 time.is, a.time.is)"
+    echo -e "  ${GREEN}[2]${NC} domain - 完整域名匹配 (如 www.time.is 只匹配该域名)"
+    echo -e "  ${GREEN}[3]${NC} domain_keyword - 关键词匹配 (如 time 匹配所有含 time 的域名)"
+    echo -e "  ${GREEN}[4]${NC} ip_cidr - IP/CIDR 匹配 (如 1.2.3.4 或 1.2.3.0/24)"
+    echo ""
+    
+    read -p "请选择 [1-4]: " type_idx
+    local match_type=""
+    case "$type_idx" in
+        1) match_type="domain_suffix" ;;
+        2) match_type="domain" ;;
+        3) match_type="domain_keyword" ;;
+        4) match_type="ip_cidr" ;;
+        *)
+            print_error "无效选项"
+            return 1
+            ;;
+    esac
+    
+    echo ""
+    read -p "请输入匹配值: " match_value
+    if [[ -z "$match_value" ]]; then
+        print_error "匹配值不能为空"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要使用的中转节点:${NC}"
+    idx=1
+    for i in "${!RELAY_TAGS[@]}"; do
+        echo -e "  ${GREEN}[${idx}]${NC} ${RELAY_DESCS[$i]}"
+        ((idx++))
+    done
+    echo ""
+    
+    read -p "请选择 [1-$((idx-1))]: " relay_idx
+    if ! [[ "$relay_idx" =~ ^[0-9]+$ ]] || [[ "$relay_idx" -lt 1 ]] || [[ "$relay_idx" -ge "$idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    ((relay_idx--))
+    local selected_relay="${RELAY_TAGS[$relay_idx]}"
+    
+    echo ""
+    read -p "请输入描述 (可选): " desc
+    if [[ -z "$desc" ]]; then
+        desc="分流规则"
+    fi
+    
+    # 添加到数组
+    local route_str="${selected_inbound}|${match_type}|${match_value}|${selected_relay}|${desc}"
+    DOMAIN_ROUTES+=("$route_str")
+    save_domain_routes_to_file
+    print_success "分流规则已添加"
+    
+    # 重新生成配置
+    if [[ -n "$INBOUNDS_JSON" ]]; then
+        echo ""
+        read -p "是否立即重新生成配置并生效？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            generate_config && start_svc
+        fi
+    fi
+}
+
+delete_domain_route() {
+    if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
+        print_warning "没有可删除的分流规则"
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要删除的分流规则:${NC}"
+    local idx=1
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        echo -e "  ${GREEN}[${idx}]${NC} 入站: ${inbound_tag} | 匹配: ${match_type}:${match_value} | 中转: ${relay_tag} | ${desc}"
+        ((idx++))
+    done
+    echo ""
+    
+    read -p "请选择 [1-$((idx-1))]: " delete_idx
+    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -ge "$idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    ((delete_idx--))
+    
+    # 删除指定索引的元素
+    local new_routes=()
+    for i in "${!DOMAIN_ROUTES[@]}"; do
+        if [[ "$i" -ne "$delete_idx" ]]; then
+            new_routes+=("${DOMAIN_ROUTES[$i]}")
+        fi
+    done
+    DOMAIN_ROUTES=("${new_routes[@]}")
+    save_domain_routes_to_file
+    print_success "分流规则已删除"
+    
+    # 重新生成配置
+    if [[ -n "$INBOUNDS_JSON" ]]; then
+        echo ""
+        read -p "是否立即重新生成配置并生效？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            generate_config && start_svc
+        fi
+    fi
+}
+
 # ==================== 主循环 ====================
 main_menu() {
     while true; do
@@ -3441,7 +3729,7 @@ main_menu() {
         load_ip_config
         
         show_main_menu
-        read -p "请选择 [0-6]: " m_choice
+        read -p "请选择 [0-7]: " m_choice
         
         case $m_choice in
             1)
@@ -3460,6 +3748,9 @@ main_menu() {
                 regenerate_all_links
                 ;;
             6)
+                domain_route_menu
+                ;;
+            7)
                 delete_self
                 ;;
             0)
