@@ -3599,10 +3599,15 @@ domain_route_menu() {
             # 显示每个入站节点的分组
             local global_idx=1
             for inbound_tag in "${!inbound_rules[@]}"; do
-                # 获取该入站节点的中转描述
+                # 获取该入站节点的详细信息
+                local inbound_proto=""
+                local inbound_port=""
                 local inbound_relay_desc=""
+                
                 for i in "${!INBOUND_TAGS[@]}"; do
                     if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                        inbound_proto="${INBOUND_PROTOS[$i]}"
+                        inbound_port="${INBOUND_PORTS[$i]}"
                         local current_relay="${INBOUND_RELAY_TAGS[$i]}"
                         for j in "${!RELAY_TAGS[@]}"; do
                             if [[ "${RELAY_TAGS[$j]}" == "$current_relay" ]]; then
@@ -3615,7 +3620,7 @@ domain_route_menu() {
                 done
                 
                 echo ""
-                echo -e "  ${CYAN}▶ 入站节点: ${inbound_tag}${NC}"
+                echo -e "  ${CYAN}▶ ${inbound_proto}:${inbound_port}${NC}"
                 if [[ -n "$inbound_relay_desc" ]]; then
                     echo -e "  ${CYAN}   默认中转: ${inbound_relay_desc}${NC}"
                 fi
@@ -3873,7 +3878,18 @@ $orig_idx|$route"
     
     # 显示规则并记录显示索引到原始索引的映射
     for inbound_tag in "${!inbound_groups[@]}"; do
-        echo -e "  ${CYAN}▶ 入站节点: ${inbound_tag}${NC}"
+        # 获取该入站节点的详细信息
+        local inbound_proto=""
+        local inbound_port=""
+        for i in "${!INBOUND_TAGS[@]}"; do
+            if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                inbound_proto="${INBOUND_PROTOS[$i]}"
+                inbound_port="${INBOUND_PORTS[$i]}"
+                break
+            fi
+        done
+        
+        echo -e "  ${CYAN}▶ ${inbound_proto}:${inbound_port}${NC}"
         
         local grouped_str="${inbound_groups[$inbound_tag]}"
         local grouped_array=()
