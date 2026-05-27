@@ -3584,23 +3584,86 @@ domain_route_menu() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        # 显示当前的分流规则
-        echo -e "${YELLOW}当前分流规则:${NC}"
+        # 显示当前的分流规则（按入站节点分组）
+        echo -e "${YELLOW}当前分流规则 (共 ${#DOMAIN_ROUTES[@]} 条):${NC}"
         if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
             echo "  (暂无分流规则)"
         else
-            local idx=1
+            # 按入站节点分组显示
+            declare -A inbound_groups
             for route in "${DOMAIN_ROUTES[@]}"; do
                 IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
-                echo -e "  ${GREEN}[${idx}]${NC} 入站: ${inbound_tag} | 匹配: ${match_type}:${match_value} | 中转: ${relay_tag} | ${desc}"
-                ((idx++))
+                if [[ -z "${inbound_groups[$inbound_tag]}" ]]; then
+                    inbound_groups[$inbound_tag]="$route"
+                else
+                    inbound_groups[$inbound_tag]="${inbound_groups[$inbound_tag]}
+$route"
+                fi
+            done
+            
+            # 显示每个入站节点的分组
+            local global_idx=1
+            for inbound_tag in "${!inbound_groups[@]}"; do
+                # 获取该入站节点的中转描述
+                local inbound_relay_desc=""
+                for i in "${!INBOUND_TAGS[@]}"; do
+                    if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                        local current_relay="${INBOUND_RELAY_TAGS[$i]}"
+                        for j in "${!RELAY_TAGS[@]}"; do
+                            if [[ "${RELAY_TAGS[$j]}" == "$current_relay" ]]; then
+                                inbound_relay_desc="${RELAY_DESCS[$j]}"
+                                break
+                            fi
+                        done
+                        break
+                    fi
+                done
+                
+                echo ""
+                echo -e "  ${CYAN}▶ 入站节点: ${inbound_tag}${NC}"
+                if [[ -n "$inbound_relay_desc" ]]; then
+                    echo -e "  ${CYAN}   默认中转: ${inbound_relay_desc}${NC}"
+                fi
+                
+                # 显示该入站下的所有分流规则
+                local routes_str="${inbound_groups[$inbound_tag]}"
+                local routes_array=()
+                while IFS= read -r line; do
+                    [[ -n "$line" ]] && routes_array+=("$line")
+                done <<< "$routes_str"
+                
+                for route in "${routes_array[@]}"; do
+                    IFS='|' read -r tag mtype mval rtag rdesc <<< "$route"
+                    if [[ -n "$mval" ]]; then
+                        # 获取中转节点的描述
+                        local relay_node_desc="$rtag"
+                        for j in "${!RELAY_TAGS[@]}"; do
+                            if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
+                                relay_node_desc="${RELAY_DESCS[$j]}"
+                                break
+                            fi
+                        done
+                        
+                        local match_display=""
+                        case "$mtype" in
+                            domain_suffix) match_display="域名后缀" ;;
+                            domain) match_display="完整域名" ;;
+                            domain_keyword) match_display="关键词" ;;
+                            ip_cidr) match_display="IP/CIDR" ;;
+                            *) match_display="$mtype" ;;
+                        esac
+                        
+                        echo -e "    ${GREEN}[${global_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
+                        ((global_idx++))
+                    fi
+                done
             done
         fi
         echo ""
         
         echo -e "  ${GREEN}[1]${NC} 添加分流规则"
         echo ""
-        echo -e "  ${GREEN}[2]${NC} 删除分流规则"
+        echo -e "  ${GREEN}[2]${NC} 删除单个分流规则"
         echo ""
         echo -e "  ${GREEN}[3]${NC} 清空所有分流规则"
         echo ""
@@ -3794,32 +3857,92 @@ delete_domain_route() {
     fi
     
     echo ""
-    echo -e "${CYAN}选择要删除的分流规则:${NC}"
-    local idx=1
-    for route in "${DOMAIN_ROUTES[@]}"; do
-        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
-        echo -e "  ${GREEN}[${idx}]${NC} 入站: ${inbound_tag} | 匹配: ${match_type}:${match_value} | 中转: ${relay_tag} | ${desc}"
-        ((idx++))
-    done
+    echo -e "${CYAN}选择要删除的分流规则 (按入站节点分组):${NC}"
     echo ""
     
-    read -p "请选择 [1-$((idx-1))]: " delete_idx
-    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -ge "$idx" ]]; then
+    # 按入站节点分组显示
+    declare -A inbound_groups
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        if [[ -z "${inbound_groups[$inbound_tag]}" ]]; then
+            inbound_groups[$inbound_tag]="$route"
+        else
+            inbound_groups[$inbound_tag]="${inbound_groups[$inbound_tag]}
+$route"
+        fi
+    done
+    
+    # 显示所有可删除的规则，统一编号
+    local global_idx=1
+    local all_routes=()
+    
+    for inbound_tag in "${!inbound_groups[@]}"; do
+        echo -e "  ${CYAN}▶ 入站节点: ${inbound_tag}${NC}"
+        
+        local routes_str="${inbound_groups[$inbound_tag]}"
+        local routes_array=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && routes_array+=("$line")
+        done <<< "$routes_str"
+        
+        for route in "${routes_array[@]}"; do
+            IFS='|' read -r tag mtype mval rtag rdesc <<< "$route"
+            if [[ -n "$mval" ]]; then
+                all_routes+=("$route")
+                
+                # 获取中转节点的描述
+                local relay_node_desc="$rtag"
+                for j in "${!RELAY_TAGS[@]}"; do
+                    if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
+                        relay_node_desc="${RELAY_DESCS[$j]}"
+                        break
+                    fi
+                done
+                
+                local match_display=""
+                case "$mtype" in
+                    domain_suffix) match_display="域名后缀" ;;
+                    domain) match_display="完整域名" ;;
+                    domain_keyword) match_display="关键词" ;;
+                    ip_cidr) match_display="IP/CIDR" ;;
+                    *) match_display="$mtype" ;;
+                esac
+                
+                echo -e "    ${GREEN}[${global_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
+                ((global_idx++))
+            fi
+        done
+        echo ""
+    done
+    
+    read -p "请选择要删除的规则编号 [1-$((global_idx-1))]: " delete_idx
+    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -ge "$global_idx" ]]; then
         print_error "无效选项"
         return 1
     fi
     ((delete_idx--))
     
-    # 删除指定索引的元素
+    # 获取要删除的规则信息用于显示
+    local to_delete="${all_routes[$delete_idx]}"
+    IFS='|' read -r del_inbound del_type del_value del_relay del_desc <<< "$to_delete"
+    
+    # 构建新数组，排除要删除的元素
     local new_routes=()
-    for i in "${!DOMAIN_ROUTES[@]}"; do
-        if [[ "$i" -ne "$delete_idx" ]]; then
-            new_routes+=("${DOMAIN_ROUTES[$i]}")
+    local found=0
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        if [[ "$route" == "$to_delete" && $found -eq 0 ]]; then
+            found=1
+        else
+            new_routes+=("$route")
         fi
     done
     DOMAIN_ROUTES=("${new_routes[@]}")
+    
     save_domain_routes_to_file
-    print_success "分流规则已删除"
+    
+    echo ""
+    print_success "已删除分流规则: ${del_type}:${del_value}"
+    echo -e "  ${CYAN}入站节点: ${del_inbound}${NC}"
     
     # 重新生成配置
     if [[ -n "$INBOUNDS_JSON" ]]; then
