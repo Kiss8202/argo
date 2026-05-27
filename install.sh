@@ -597,22 +597,30 @@ load_inbounds_from_config() {
     
     INBOUNDS_JSON="$inbound_list"
     
-    # 从路由规则中恢复中转配置
+    # 从路由规则中恢复中转配置（只处理入站中转规则，忽略分流域名规则）
     local route_rules=$(jq -c '.route.rules[]? // empty' "${CONFIG_FILE}" 2>/dev/null)
     if [[ -n "$route_rules" ]]; then
         while IFS= read -r rule; do
-            local inbound_array=$(echo "$rule" | jq -r '.inbound[]? // empty' 2>/dev/null)
-            local outbound=$(echo "$rule" | jq -r '.outbound // ""' 2>/dev/null)
+            # 检查是否为入站中转规则（只处理包含inbound字段且不包含域名/IP匹配字段的规则）
+            local has_inbound=$(echo "$rule" | jq -e '.inbound // empty' 2>/dev/null)
+            local has_domain=$(echo "$rule" | jq -e '.domain // .domain_suffix // .domain_keyword // .domain_regex // empty' 2>/dev/null)
+            local has_ip=$(echo "$rule" | jq -e '.ip_cidr // .ip // empty' 2>/dev/null)
             
-            if [[ -n "$outbound" && "$outbound" != "direct" ]]; then
-                while IFS= read -r inbound_tag; do
-                    for i in "${!INBOUND_TAGS[@]}"; do
-                        if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
-                            INBOUND_RELAY_TAGS[$i]="$outbound"
-                            break
-                        fi
-                    done
-                done <<< "$inbound_array"
+            # 只处理入站中转规则，忽略域名/IP分流规则
+            if [[ -n "$has_inbound" && -z "$has_domain" && -z "$has_ip" ]]; then
+                local inbound_array=$(echo "$rule" | jq -r '.inbound[]? // empty' 2>/dev/null)
+                local outbound=$(echo "$rule" | jq -r '.outbound // ""' 2>/dev/null)
+                
+                if [[ -n "$outbound" && "$outbound" != "direct" ]]; then
+                    while IFS= read -r inbound_tag; do
+                        for i in "${!INBOUND_TAGS[@]}"; do
+                            if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                                INBOUND_RELAY_TAGS[$i]="$outbound"
+                                break
+                            fi
+                        done
+                    done <<< "$inbound_array"
+                fi
             fi
         done <<< "$route_rules"
     fi
