@@ -3589,23 +3589,16 @@ domain_route_menu() {
         if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
             echo "  (暂无分流规则)"
         else
-            # 按入站节点分组显示
-            declare -A inbound_groups
+            # 先按入站节点分组
+            declare -A inbound_rules
             for route in "${DOMAIN_ROUTES[@]}"; do
                 IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
-                # 使用唯一标识符避免重复分组问题
-                local key="$inbound_tag"
-                if [[ -z "${inbound_groups[$key]}" ]]; then
-                    inbound_groups[$key]="$route"
-                else
-                    inbound_groups[$key]="${inbound_groups[$key]}
-$route"
-                fi
+                inbound_rules["$inbound_tag"]+="$route;"
             done
             
             # 显示每个入站节点的分组
             local global_idx=1
-            for inbound_tag in "${!inbound_groups[@]}"; do
+            for inbound_tag in "${!inbound_rules[@]}"; do
                 # 获取该入站节点的中转描述
                 local inbound_relay_desc=""
                 for i in "${!INBOUND_TAGS[@]}"; do
@@ -3628,18 +3621,11 @@ $route"
                 fi
                 
                 # 显示该入站下的所有分流规则
-                local routes_str="${inbound_groups[$inbound_tag]}"
-                local -A seen_routes  # 避免重复显示
-                local routes_array=()
-                
-                while IFS= read -r line; do
-                    if [[ -n "$line" && -z "${seen_routes["$line"]}" ]]; then
-                        seen_routes["$line"]=1
-                        routes_array+=("$line")
-                    fi
-                done <<< "$routes_str"
+                IFS=';' read -ra routes_array <<< "${inbound_rules[$inbound_tag]}"
                 
                 for route in "${routes_array[@]}"; do
+                    [[ -z "$route" ]] && continue
+                    
                     IFS='|' read -r tag mtype mval rtag rdesc <<< "$route"
                     if [[ -n "$mval" ]]; then
                         # 获取中转节点的描述
