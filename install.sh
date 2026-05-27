@@ -3593,10 +3593,12 @@ domain_route_menu() {
             declare -A inbound_groups
             for route in "${DOMAIN_ROUTES[@]}"; do
                 IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
-                if [[ -z "${inbound_groups[$inbound_tag]}" ]]; then
-                    inbound_groups[$inbound_tag]="$route"
+                # 使用唯一标识符避免重复分组问题
+                local key="$inbound_tag"
+                if [[ -z "${inbound_groups[$key]}" ]]; then
+                    inbound_groups[$key]="$route"
                 else
-                    inbound_groups[$inbound_tag]="${inbound_groups[$inbound_tag]}
+                    inbound_groups[$key]="${inbound_groups[$key]}
 $route"
                 fi
             done
@@ -3627,9 +3629,14 @@ $route"
                 
                 # 显示该入站下的所有分流规则
                 local routes_str="${inbound_groups[$inbound_tag]}"
+                local -A seen_routes  # 避免重复显示
                 local routes_array=()
+                
                 while IFS= read -r line; do
-                    [[ -n "$line" ]] && routes_array+=("$line")
+                    if [[ -n "$line" && -z "${seen_routes["$line"]}" ]]; then
+                        seen_routes["$line"]=1
+                        routes_array+=("$line")
+                    fi
                 done <<< "$routes_str"
                 
                 for route in "${routes_array[@]}"; do
@@ -3860,80 +3867,81 @@ delete_domain_route() {
     echo -e "${CYAN}选择要删除的分流规则 (按入站节点分组):${NC}"
     echo ""
     
-    # 按入站节点分组显示
+    # 为每条规则创建带有原始索引的结构，同时按入站分组
     declare -A inbound_groups
-    for route in "${DOMAIN_ROUTES[@]}"; do
+    local -A index_map
+    local display_idx=1
+    
+    for orig_idx in "${!DOMAIN_ROUTES[@]}"; do
+        local route="${DOMAIN_ROUTES[$orig_idx]}"
         IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        
+        # 存储分组信息
         if [[ -z "${inbound_groups[$inbound_tag]}" ]]; then
-            inbound_groups[$inbound_tag]="$route"
+            inbound_groups[$inbound_tag]="$orig_idx|$route"
         else
             inbound_groups[$inbound_tag]="${inbound_groups[$inbound_tag]}
-$route"
+$orig_idx|$route"
         fi
     done
     
-    # 显示所有可删除的规则，统一编号
-    local global_idx=1
-    local all_routes=()
-    
+    # 显示规则并记录显示索引到原始索引的映射
     for inbound_tag in "${!inbound_groups[@]}"; do
         echo -e "  ${CYAN}▶ 入站节点: ${inbound_tag}${NC}"
         
-        local routes_str="${inbound_groups[$inbound_tag]}"
-        local routes_array=()
+        local grouped_str="${inbound_groups[$inbound_tag]}"
+        local grouped_array=()
         while IFS= read -r line; do
-            [[ -n "$line" ]] && routes_array+=("$line")
-        done <<< "$routes_str"
+            [[ -n "$line" ]] && grouped_array+=("$line")
+        done <<< "$grouped_str"
         
-        for route in "${routes_array[@]}"; do
-            IFS='|' read -r tag mtype mval rtag rdesc <<< "$route"
-            if [[ -n "$mval" ]]; then
-                all_routes+=("$route")
-                
-                # 获取中转节点的描述
-                local relay_node_desc="$rtag"
-                for j in "${!RELAY_TAGS[@]}"; do
-                    if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
-                        relay_node_desc="${RELAY_DESCS[$j]}"
-                        break
-                    fi
-                done
-                
-                local match_display=""
-                case "$mtype" in
-                    domain_suffix) match_display="域名后缀" ;;
-                    domain) match_display="完整域名" ;;
-                    domain_keyword) match_display="关键词" ;;
-                    ip_cidr) match_display="IP/CIDR" ;;
-                    *) match_display="$mtype" ;;
-                esac
-                
-                echo -e "    ${GREEN}[${global_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
-                ((global_idx++))
-            fi
+        for item in "${grouped_array[@]}"; do
+            IFS='|' read -r orig_idx tag mtype mval rtag rdesc <<< "$item"
+            
+            # 记录显示索引到原始索引的映射
+            index_map[$display_idx]="$orig_idx"
+            
+            # 获取中转节点的描述
+            local relay_node_desc="$rtag"
+            for j in "${!RELAY_TAGS[@]}"; do
+                if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
+                    relay_node_desc="${RELAY_DESCS[$j]}"
+                    break
+                fi
+            done
+            
+            local match_display=""
+            case "$mtype" in
+                domain_suffix) match_display="域名后缀" ;;
+                domain) match_display="完整域名" ;;
+                domain_keyword) match_display="关键词" ;;
+                ip_cidr) match_display="IP/CIDR" ;;
+                *) match_display="$mtype" ;;
+            esac
+            
+            echo -e "    ${GREEN}[${display_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
+            ((display_idx++))
         done
         echo ""
     done
     
-    read -p "请选择要删除的规则编号 [1-$((global_idx-1))]: " delete_idx
-    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -ge "$global_idx" ]]; then
+    local max_idx=$((display_idx - 1))
+    read -p "请选择要删除的规则编号 [1-$max_idx]: " delete_idx
+    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -gt "$max_idx" ]]; then
         print_error "无效选项"
         return 1
     fi
-    ((delete_idx--))
     
-    # 获取要删除的规则信息用于显示
-    local to_delete="${all_routes[$delete_idx]}"
+    # 获取对应的原始索引
+    local orig_idx_to_delete="${index_map[$delete_idx]}"
+    local to_delete="${DOMAIN_ROUTES[$orig_idx_to_delete]}"
     IFS='|' read -r del_inbound del_type del_value del_relay del_desc <<< "$to_delete"
     
-    # 构建新数组，排除要删除的元素
+    # 构建新数组，排除要删除的元素（使用原始索引）
     local new_routes=()
-    local found=0
-    for route in "${DOMAIN_ROUTES[@]}"; do
-        if [[ "$route" == "$to_delete" && $found -eq 0 ]]; then
-            found=1
-        else
-            new_routes+=("$route")
+    for i in "${!DOMAIN_ROUTES[@]}"; do
+        if [[ "$i" -ne "$orig_idx_to_delete" ]]; then
+            new_routes+=("${DOMAIN_ROUTES[$i]}")
         fi
     done
     DOMAIN_ROUTES=("${new_routes[@]}")
