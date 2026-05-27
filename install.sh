@@ -3602,27 +3602,43 @@ domain_route_menu() {
                 # 获取该入站节点的详细信息
                 local inbound_proto=""
                 local inbound_port=""
-                local inbound_relay_desc=""
+                local inbound_relay_tag=""
+                local inbound_relay_info=""
                 
                 for i in "${!INBOUND_TAGS[@]}"; do
                     if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
                         inbound_proto="${INBOUND_PROTOS[$i]}"
                         inbound_port="${INBOUND_PORTS[$i]}"
-                        local current_relay="${INBOUND_RELAY_TAGS[$i]}"
-                        for j in "${!RELAY_TAGS[@]}"; do
-                            if [[ "${RELAY_TAGS[$j]}" == "$current_relay" ]]; then
-                                inbound_relay_desc="${RELAY_DESCS[$j]}"
-                                break
-                            fi
-                        done
+                        inbound_relay_tag="${INBOUND_RELAY_TAGS[$i]}"
                         break
                     fi
                 done
                 
+                # 获取入站节点使用的中转配置信息
+                if [[ "$inbound_relay_tag" != "direct" && -n "$inbound_relay_tag" ]]; then
+                    # 从 RELAY_JSONS 中提取服务器和端口信息
+                    for j in "${!RELAY_TAGS[@]}"; do
+                        if [[ "${RELAY_TAGS[$j]}" == "$inbound_relay_tag" ]]; then
+                            local relay_json="${RELAY_JSONS[$j]}"
+                            # 提取中转协议类型
+                            local relay_type=$(echo "$relay_json" | grep -o '"type": "[^"]*"' | cut -d'"' -f4 | tr '[:lower:]' '[:upper:]')
+                            # 提取服务器地址
+                            local relay_server=$(echo "$relay_json" | grep -o '"server": "[^"]*"' | cut -d'"' -f4)
+                            # 提取端口
+                            local relay_port=$(echo "$relay_json" | grep -o '"server_port": [0-9]*' | grep -o '[0-9]*')
+                            
+                            if [[ -n "$relay_type" && -n "$relay_server" && -n "$relay_port" ]]; then
+                                inbound_relay_info="${relay_type} ${relay_server}:${relay_port}"
+                            fi
+                            break
+                        fi
+                    done
+                fi
+                
                 echo ""
                 echo -e "  ${CYAN}▶ ${inbound_proto}:${inbound_port}${NC}"
-                if [[ -n "$inbound_relay_desc" ]]; then
-                    echo -e "  ${CYAN}   默认中转: ${inbound_relay_desc}${NC}"
+                if [[ -n "$inbound_relay_info" ]]; then
+                    echo -e "  ${CYAN}   默认中转: ${inbound_relay_info}${NC}"
                 fi
                 
                 # 显示该入站下的所有分流规则
