@@ -1889,6 +1889,7 @@ setup_anytls() {
 # ==================== 中转链接解析 ====================
 parse_socks_link() {
     local link="$1"
+    local custom_desc="$2"
     
     if [[ "$link" =~ ^socks://([A-Za-z0-9+/=]+) ]]; then
         print_info "检测到 base64 编码的 SOCKS 链接，正在解码..."
@@ -1932,7 +1933,11 @@ parse_socks_link() {
   \"username\": \"${username}\",
   \"password\": \"${password}\"
 }"
-        relay_desc="SOCKS5 ${server}:${port} (认证)"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="SOCKS5 ${server}:${port} (认证)"
+        fi
     else
         local server=$(echo "$data" | cut -d':' -f1)
         local port=$(echo "$data" | cut -d':' -f2)
@@ -1950,7 +1955,11 @@ parse_socks_link() {
   \"server_port\": ${port},
   \"version\": \"5\"
 }"
-        relay_desc="SOCKS5 ${server}:${port}"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="SOCKS5 ${server}:${port}"
+        fi
     fi
     
     RELAY_TAGS+=("$tag")
@@ -1963,6 +1972,7 @@ parse_socks_link() {
 
 parse_http_link() {
     local link="$1"
+    local custom_desc="$2"
     local protocol=$(echo "$link" | cut -d':' -f1)
     local data=$(echo "$link" | sed 's|https\?://||')
     
@@ -1990,7 +2000,11 @@ parse_http_link() {
   \"password\": \"${password}\",
   \"tls\": {\"enabled\": ${tls}}
 }"
-        relay_desc="${protocol^^} ${server}:${port} (认证)"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="${protocol^^} ${server}:${port} (认证)"
+        fi
     else
         local server=$(echo "$data" | cut -d':' -f1)
         local port=$(echo "$data" | cut -d':' -f2 | cut -d'/' -f1 | cut -d'#' -f1 | cut -d'?' -f1)
@@ -2002,7 +2016,11 @@ parse_http_link() {
   \"server_port\": ${port},
   \"tls\": {\"enabled\": ${tls}}
 }"
-        relay_desc="${protocol^^} ${server}:${port}"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="${protocol^^} ${server}:${port}"
+        fi
     fi
     
     RELAY_TAGS+=("$tag")
@@ -2015,6 +2033,7 @@ parse_http_link() {
 
 parse_ss_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|ss://||' | cut -d'#' -f1)
     
     if [[ "$data" =~ @ ]]; then
@@ -2041,7 +2060,12 @@ parse_ss_link() {
   \"method\": \"${method}\",
   \"password\": \"${password}\"
 }"
-        local relay_desc="Shadowsocks ${server}:${port}"
+        local relay_desc
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="Shadowsocks ${server}:${port}"
+        fi
         
         RELAY_TAGS+=("$tag")
         RELAY_JSONS+=("$relay_json")
@@ -2057,6 +2081,7 @@ parse_ss_link() {
 
 parse_vmess_link() {
     local link="$1"
+    local custom_desc="$2"
     local base64_data=$(echo "$link" | sed 's|vmess://||')
     local json=$(echo "$base64_data" | base64 -d 2>/dev/null)
     
@@ -2086,7 +2111,12 @@ parse_vmess_link() {
   \"alter_id\": ${alterId},
   \"security\": \"${security}\"
 }"
-    local relay_desc="VMess ${server}:${port}"
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="VMess ${server}:${port}"
+    fi
     
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
@@ -2098,6 +2128,7 @@ parse_vmess_link() {
 
 parse_vless_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|vless://||')
     local uuid=$(echo "$data" | cut -d'@' -f1)
     local server_port_params=$(echo "$data" | cut -d'@' -f2)
@@ -2138,7 +2169,12 @@ parse_vless_link() {
   \"server_port\": ${port},
   \"uuid\": \"${uuid}\"${flow_config}${tls_config}
 }"
-    local relay_desc="VLESS ${server}:${port}"
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="VLESS ${server}:${port}"
+    fi
     
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
@@ -2150,6 +2186,7 @@ parse_vless_link() {
 
 parse_trojan_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|trojan://||')
     local password=$(echo "$data" | cut -d'@' -f1)
     local server_port_params=$(echo "$data" | cut -d'@' -f2)
@@ -2174,7 +2211,12 @@ parse_trojan_link() {
     \"server_name\": \"${sni}\"
   }
 }"
-    local relay_desc="Trojan ${server}:${port}"
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="Trojan ${server}:${port}"
+    fi
     
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
@@ -2185,8 +2227,9 @@ parse_trojan_link() {
 }
 
 setup_relay() {
-    # 加载中转配置
+    # 加载中转配置和分流规则
     load_relays_from_file
+    load_domain_routes_from_file
     
     while true; do
         echo ""
@@ -2211,9 +2254,10 @@ setup_relay() {
         echo -e "  ${GREEN}[1]${NC} 添加新的中转链接"
         echo -e "  ${GREEN}[2]${NC} 为节点配置中转"
         echo -e "  ${GREEN}[3]${NC} 删除中转链接"
+        echo -e "  ${GREEN}[4]${NC} 域名分流配置"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-3]: " r_choice
+        read -p "请选择 [0-4]: " r_choice
         
         case $r_choice in
             1)
@@ -2264,18 +2308,21 @@ setup_relay() {
                 if [[ -z "$RELAY_LINK" ]]; then
                     print_warning "未提供链接，中转配置保持不变"
                 else
+                    echo ""
+                    read -p "请输入此节点的描述信息 (如：香港-电信-1x 或 日本-软银-2x，留空则自动生成): " custom_desc
+                    
                     if [[ "$RELAY_LINK" =~ ^socks ]]; then
-                        parse_socks_link "$RELAY_LINK"
+                        parse_socks_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^https? ]]; then
-                        parse_http_link "$RELAY_LINK"
+                        parse_http_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^ss:// ]]; then
-                        parse_ss_link "$RELAY_LINK"
+                        parse_ss_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^vmess:// ]]; then
-                        parse_vmess_link "$RELAY_LINK"
+                        parse_vmess_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^vless:// ]]; then
-                        parse_vless_link "$RELAY_LINK"
+                        parse_vless_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^trojan:// ]]; then
-                        parse_trojan_link "$RELAY_LINK"
+                        parse_trojan_link "$RELAY_LINK" "$custom_desc"
                     else
                         print_error "不支持的链接格式"
                     fi
@@ -2386,7 +2433,11 @@ setup_relay() {
                             INBOUND_RELAY_TAGS[$i]="direct"
                         done
                         
-                        print_success "已删除全部中转配置"
+                        # 同时删除所有相关的分流规则
+                        DOMAIN_ROUTES=()
+                        rm -f "${DOMAIN_ROUTE_FILE}"
+                        
+                        print_success "已删除全部中转配置和相关分流规则"
                         
                         # 重新生成配置
                         if [[ -n "$INBOUNDS_JSON" ]]; then
@@ -2418,6 +2469,17 @@ setup_relay() {
                             fi
                         done
                         
+                        # 同时删除所有相关的分流规则
+                        local new_routes=()
+                        for route in "${DOMAIN_ROUTES[@]}"; do
+                            IFS='|' read -r in_tag match_type match_val relay_tag desc <<< "$route"
+                            if [[ "$relay_tag" != "$del_tag" ]]; then
+                                new_routes+=("$route")
+                            fi
+                        done
+                        DOMAIN_ROUTES=("${new_routes[@]}")
+                        save_domain_routes_to_file
+                        
                         save_relays_to_file
                         print_success "已删除中转: ${del_desc}"
                         
@@ -2429,6 +2491,9 @@ setup_relay() {
                 else
                     print_error "无效选择"
                 fi
+                ;;
+            4)
+                domain_route_menu
                 ;;
             0)
                 break
@@ -3233,22 +3298,20 @@ show_main_menu() {
         fi
     fi
     echo ""
-    echo -e "  ${GREEN}[1]${NC} 添加/继续添加节点"
-    echo ""
-    echo -e "  ${GREEN}[2]${NC} 中转配置 (添加/配置/删除)"
-    echo ""
-    echo -e "  ${GREEN}[3]${NC} 出入站配置 (IPv4/IPv6)"
-    echo ""
-    echo -e "  ${GREEN}[4]${NC} 配置 / 查看节点"
-    echo ""
-    echo -e "  ${GREEN}[5]${NC} 重新生成链接文件"
-    echo ""
-    echo -e "  ${GREEN}[6]${NC} 域名分流配置"
-    echo ""
-    echo -e "  ${GREEN}[7]${NC} 一键删除脚本并退出"
-    echo ""
-    echo -e "  ${GREEN}[0]${NC} 退出脚本"
-    echo ""
+        echo -e "  ${GREEN}[1]${NC} 添加/继续添加节点"
+        echo ""
+        echo -e "  ${GREEN}[2]${NC} 中转配置 (添加/配置/删除/域名分流)"
+        echo ""
+        echo -e "  ${GREEN}[3]${NC} 出入站配置 (IPv4/IPv6)"
+        echo ""
+        echo -e "  ${GREEN}[4]${NC} 配置/查看节点"
+        echo ""
+        echo -e "  ${GREEN}[5]${NC} 重新生成链接文件"
+        echo ""
+        echo -e "  ${GREEN}[6]${NC} 一键删除脚本并退出"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 退出脚本"
+        echo ""
 }
 
 # ==================== 配置查看菜单 ====================
@@ -3729,7 +3792,7 @@ main_menu() {
         load_ip_config
         
         show_main_menu
-        read -p "请选择 [0-7]: " m_choice
+        read -p "请选择 [0-6]: " m_choice
         
         case $m_choice in
             1)
@@ -3748,9 +3811,6 @@ main_menu() {
                 regenerate_all_links
                 ;;
             6)
-                domain_route_menu
-                ;;
-            7)
                 delete_self
                 ;;
             0)
