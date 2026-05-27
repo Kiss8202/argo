@@ -3692,10 +3692,24 @@ add_domain_route() {
     esac
     
     echo ""
-    read -p "请输入匹配值: " match_value
-    if [[ -z "$match_value" ]]; then
-        print_error "匹配值不能为空"
+    echo -e "${CYAN}输入要分流的域名或IP (支持多个，用英文逗号分隔):${NC}"
+    echo -e "${YELLOW}示例: time.is, ip.sb, youtube.com${NC}"
+    echo -e "${YELLOW}       1.2.3.4, 5.6.7.0/24${NC}"
+    echo ""
+    read -p "请输入: " match_input
+    
+    # 预处理输入：替换中文逗号为英文逗号，并去除空格
+    match_input=$(echo "$match_input" | sed 's/，/,/g' | tr -d ' ')
+    
+    if [[ -z "$match_input" ]]; then
+        print_error "输入不能为空"
         return 1
+    fi
+    
+    # 检查是否包含逗号，决定是单个还是批量
+    local is_batch=0
+    if [[ "$match_input" == *,* ]]; then
+        is_batch=1
     fi
     
     echo ""
@@ -3714,18 +3728,54 @@ add_domain_route() {
     fi
     ((relay_idx--))
     local selected_relay="${RELAY_TAGS[$relay_idx]}"
+    local selected_relay_desc="${RELAY_DESCS[$relay_idx]}"
     
     echo ""
     read -p "请输入描述 (可选): " desc
     if [[ -z "$desc" ]]; then
-        desc="分流规则"
+        if [[ $is_batch -eq 1 ]]; then
+            desc="批量分流规则"
+        else
+            desc="分流规则"
+        fi
     fi
     
-    # 添加到数组
-    local route_str="${selected_inbound}|${match_type}|${match_value}|${selected_relay}|${desc}"
-    DOMAIN_ROUTES+=("$route_str")
-    save_domain_routes_to_file
-    print_success "分流规则已添加"
+    # 批量添加分流规则
+    if [[ $is_batch -eq 1 ]]; then
+        # 使用 IFS 分割字符串
+        IFS=',' read -ra MATCH_VALUES <<< "$match_input"
+        local added_count=0
+        local base_idx=${#DOMAIN_ROUTES[@]}
+        
+        for match_value in "${MATCH_VALUES[@]}"; do
+            # 去除首尾空格
+            match_value=$(echo "$match_value" | xargs)
+            if [[ -n "$match_value" ]]; then
+                local route_str="${selected_inbound}|${match_type}|${match_value}|${selected_relay}|${desc}"
+                DOMAIN_ROUTES+=("$route_str")
+                ((added_count++))
+            fi
+        done
+        
+        if [[ $added_count -gt 0 ]]; then
+            save_domain_routes_to_file
+            print_success "已添加 ${added_count} 条分流规则到入站 ${selected_inbound}，全部走 ${selected_relay_desc}"
+            echo ""
+            echo -e "${CYAN}添加的域名/IP:${NC}"
+            for match_value in "${MATCH_VALUES[@]}"; do
+                match_value=$(echo "$match_value" | xargs)
+                if [[ -n "$match_value" ]]; then
+                    echo -e "  ${GREEN}✓${NC} ${match_value}"
+                fi
+            done
+        fi
+    else
+        # 单个添加
+        local route_str="${selected_inbound}|${match_type}|${match_input}|${selected_relay}|${desc}"
+        DOMAIN_ROUTES+=("$route_str")
+        save_domain_routes_to_file
+        print_success "分流规则已添加: ${match_input} -> ${selected_relay_desc}"
+    fi
     
     # 重新生成配置
     if [[ -n "$INBOUNDS_JSON" ]]; then
