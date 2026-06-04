@@ -2547,9 +2547,8 @@ ip_config_menu() {
                 INBOUND_IP_MODE="ipv4"
                 save_ip_config
                 print_success "入站已设置为 IPv4"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -2562,9 +2561,8 @@ ip_config_menu() {
                 INBOUND_IP_MODE="ipv6"
                 save_ip_config
                 print_success "入站已设置为 IPv6"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -2572,10 +2570,9 @@ ip_config_menu() {
                 INBOUND_IP_MODE="dual"
                 save_ip_config
                 print_success "入站已设置为双栈 (IPv4+IPv6)"
-                echo -e "${YELLOW}提示: 双栈模式将同时监听 IPv4 和 IPv6${NC}"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                echo -e "${YELLOW}双栈模式将同时监听 IPv4 和 IPv6${NC}"
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -2583,9 +2580,8 @@ ip_config_menu() {
                 OUTBOUND_IP_MODE="ipv4"
                 save_ip_config
                 print_success "出站已设置为 IPv4"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -2598,9 +2594,8 @@ ip_config_menu() {
                 OUTBOUND_IP_MODE="ipv6"
                 save_ip_config
                 print_success "出站已设置为 IPv6"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -2608,10 +2603,9 @@ ip_config_menu() {
                 OUTBOUND_IP_MODE="dual"
                 save_ip_config
                 print_success "出站已设置为双栈 (IPv4+IPv6)"
-                echo -e "${YELLOW}提示: 双栈模式将同时使用 IPv4 和 IPv6，由系统自动选择${NC}"
-                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
-                read -p "是否立即重新生成配置? (y/N): " regen
-                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                echo -e "${YELLOW}双栈模式将同时使用 IPv4 和 IPv6，由系统自动选择${NC}"
+                if [[ -n "$INBOUNDS_JSON" ]]; then
+                    echo -e "${YELLOW}正在重新生成配置...${NC}"
                     generate_config && start_svc
                 fi
                 ;;
@@ -4862,13 +4856,11 @@ add_domain_route() {
         print_success "分流规则已添加: ${match_input} -> ${selected_relay_desc}"
     fi
     
-    # 重新生成配置
+    # 自动重新生成配置
     if [[ -n "$INBOUNDS_JSON" ]]; then
         echo ""
-        read -p "是否立即重新生成配置并生效？(y/N): " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            generate_config && start_svc
-        fi
+        echo -e "${YELLOW}正在重新生成配置...${NC}"
+        generate_config && start_svc
     fi
 }
 
@@ -5007,13 +4999,11 @@ $orig_idx|$route"
     print_success "已删除分流规则: ${del_type}:${del_value}"
     echo -e "  ${CYAN}入站节点: ${del_inbound}${NC}"
     
-    # 重新生成配置
+    # 自动重新生成配置
     if [[ -n "$INBOUNDS_JSON" ]]; then
         echo ""
-        read -p "是否立即重新生成配置并生效？(y/N): " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            generate_config && start_svc
-        fi
+        echo -e "${YELLOW}正在重新生成配置...${NC}"
+        generate_config && start_svc
     fi
 }
 
