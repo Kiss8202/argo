@@ -800,7 +800,8 @@ regenerate_links_from_config() {
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
                 if [[ -n "$shadowtls_password" ]]; then
-                    local ss_inbound=$(jq -c ".inbounds[] | select(.tag == \"shadowsocks-in-${port}\")" "${CONFIG_FILE}" 2>/dev/null)
+                    local ss_tag="shadowsocks-in-${port}"
+                    local ss_inbound=$(jq --arg tag "$ss_tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
                     local ss_password=$(echo "$ss_inbound" | jq -r '.password // ""' 2>/dev/null)
                     local ss_method=$(echo "$ss_inbound" | jq -r '.method // "2022-blake3-aes-128-gcm"' 2>/dev/null)
                     
