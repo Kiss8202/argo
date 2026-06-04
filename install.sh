@@ -3552,7 +3552,7 @@ modify_reality_node() {
         echo ""
         
         # 获取当前配置
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
         local current_uuid=$(echo "$inbound" | jq -r '.users[0].uuid // empty' 2>/dev/null)
         local current_short_id=$(echo "$inbound" | jq -r '.reality.short_id[0] // empty' 2>/dev/null)
@@ -3594,12 +3594,12 @@ modify_reality_node() {
                     fi
                     
                     # 更新端口
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     # 更新标签
                     local new_tag="vless-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -3619,7 +3619,7 @@ modify_reality_node() {
                 read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
                 
                 if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tls.server_name = "'"${new_sni}"'" | .reality.server_name = "'"${new_sni}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .reality.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
                 else
@@ -3631,7 +3631,7 @@ modify_reality_node() {
             3)
                 # 重新生成 UUID
                 local new_uuid=$(openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)/\1-\2-\3-\4-/')
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].uuid = "'"${new_uuid}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg uuid "$new_uuid" '.inbounds |= map(if .tag == $tag then .users[0].uuid = $uuid else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "UUID 已重新生成"
                 echo -e "  新 UUID: ${CYAN}${new_uuid}${NC}"
                 
@@ -3640,7 +3640,7 @@ modify_reality_node() {
             4)
                 # 重新生成 Short ID
                 local new_short_id=$(openssl rand -hex 4)
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .reality.short_id = ["'"${new_short_id}"'"] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg sid "$new_short_id" '.inbounds |= map(if .tag == $tag then .reality.short_id = [$sid] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "Short ID 已重新生成"
                 echo -e "  新 Short ID: ${CYAN}${new_short_id}${NC}"
                 
@@ -3652,7 +3652,7 @@ modify_reality_node() {
                 local priv_key=$(echo "$keys" | openssl ec -outform DER 2>/dev/null | tail -c +8 | head -c 32 | xxd -p -c 32 | tr -d '\n')
                 local pub_key=$(echo "$keys" | openssl ec -pubout -outform DER 2>/dev/null | tail -c +26 | head -c 32 | xxd -p -c 32 | tr -d '\n')
                 
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .reality.private_key = "'"${priv_key}"'" | .reality.public_key = "'"${pub_key}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg priv "$priv_key" --arg pub "$pub_key" '.inbounds |= map(if .tag == $tag then .reality.private_key = $priv | .reality.public_key = $pub else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "Reality 密钥对已重新生成"
                 echo -e "  公钥: ${CYAN}${pub_key}${NC}"
                 
@@ -3696,7 +3696,7 @@ modify_hysteria2_node() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
         local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
         local has_obfs=$(echo "$inbound" | jq -e '.obfs != null' 2>/dev/null)
@@ -3744,11 +3744,11 @@ modify_hysteria2_node() {
                         continue
                     fi
                     
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     local new_tag="hy2-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -3767,7 +3767,7 @@ modify_hysteria2_node() {
                 read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
                 
                 if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tls.server_name = "'"${new_sni}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
                 else
@@ -3786,7 +3786,7 @@ modify_hysteria2_node() {
                     print_info "已随机生成密码: ${new_password}"
                 fi
                 
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].password = "'"${new_password}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg pass "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "密码已修改"
                 
                 read -p "按回车继续..." _
@@ -3809,7 +3809,7 @@ modify_hysteria2_node() {
                     1)
                         # 启用混淆，随机密码
                         local obfs_pass=$(openssl rand -hex 16)
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then .obfs = {"type": "salamander", "password": "'"${obfs_pass}"'"} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs = {"type": "salamander", "password": $pass} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "混淆已启用，密码: ${obfs_pass}"
                         read -p "按回车继续..." _
                         ;;
@@ -3824,7 +3824,7 @@ modify_hysteria2_node() {
                             continue
                         fi
                         
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then .obfs = {"type": "salamander", "password": "'"${obfs_pass}"'"} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs = {"type": "salamander", "password": $pass} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "混淆已启用"
                         read -p "按回车继续..." _
                         ;;
@@ -3844,7 +3844,7 @@ modify_hysteria2_node() {
                             print_info "已随机生成密码: ${obfs_pass}"
                         fi
                         
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then .obfs.password = "'"${obfs_pass}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs.password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "混淆密码已修改"
                         read -p "按回车继续..." _
                         ;;
@@ -3856,7 +3856,7 @@ modify_hysteria2_node() {
                             continue
                         fi
                         
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then del(.obfs) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" '.inbounds |= map(if .tag == $tag then del(.obfs) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "混淆已禁用"
                         read -p "按回车继续..." _
                         ;;
@@ -3898,7 +3898,7 @@ modify_socks5_node() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local has_auth=$(echo "$inbound" | jq -e '.users != null' 2>/dev/null)
         local auth_user=""
         local auth_pass=""
@@ -3943,11 +3943,11 @@ modify_socks5_node() {
                         continue
                     fi
                     
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     local new_tag="socks-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -3978,7 +3978,7 @@ modify_socks5_node() {
                 new_pass=${new_pass:-$auth_pass}
                 
                 if [[ "$new_user" != "$auth_user" ]] || [[ "$new_pass" != "$auth_pass" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].username = "'"${new_user}"'" | .users[0].password = "'"${new_pass}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg user "$new_user" --arg pass "$new_pass" '.inbounds |= map(if .tag == $tag then .users[0].username = $user | .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     print_success "认证信息已修改"
                 fi
                 
@@ -3991,7 +3991,7 @@ modify_socks5_node() {
                     read confirm_disable
                     
                     if [[ "$confirm_disable" =~ ^[Yy]$ ]]; then
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then del(.users) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" '.inbounds |= map(if .tag == $tag then del(.users) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "认证已禁用"
                     fi
                 else
@@ -4001,7 +4001,7 @@ modify_socks5_node() {
                     if [[ "$confirm_enable" =~ ^[Yy]$ ]]; then
                         local user="user"
                         local pass=$(openssl rand -hex 16)
-                        jq '.inbounds |= map(if .tag == "'"${tag}"' then .users = [{"username": "'"${user}"'", "password": "'"${pass}"'"}] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                        jq --arg tag "$tag" --arg user "$user" --arg pass "$pass" '.inbounds |= map(if .tag == $tag then .users = [{"username": $user, "password": $pass}] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                         print_success "认证已启用: ${user}/${pass}"
                     fi
                 fi
@@ -4041,7 +4041,7 @@ modify_shadowtls_node() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
         local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
         
@@ -4077,11 +4077,11 @@ modify_shadowtls_node() {
                         continue
                     fi
                     
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     local new_tag="tls-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -4100,7 +4100,7 @@ modify_shadowtls_node() {
                 read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
                 
                 if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tls.server_name = "'"${new_sni}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
                 else
@@ -4119,7 +4119,7 @@ modify_shadowtls_node() {
                     print_info "已随机生成密码: ${new_password}"
                 fi
                 
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].password = "'"${new_password}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg pass "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "密码已修改"
                 
                 read -p "按回车继续..." _
@@ -4157,7 +4157,7 @@ modify_https_node() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
         local has_auth=$(echo "$inbound" | jq -e '.users != null' 2>/dev/null)
         local auth_user=""
@@ -4204,11 +4204,11 @@ modify_https_node() {
                         continue
                     fi
                     
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     local new_tag="http-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -4227,7 +4227,7 @@ modify_https_node() {
                 read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
                 
                 if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tls.server_name = "'"${new_sni}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
                 else
@@ -4254,7 +4254,7 @@ modify_https_node() {
                 new_pass=${new_pass:-$auth_pass}
                 
                 if [[ "$new_user" != "$auth_user" ]] || [[ "$new_pass" != "$auth_pass" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].username = "'"${new_user}"'" | .users[0].password = "'"${new_pass}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg user "$new_user" --arg pass "$new_pass" '.inbounds |= map(if .tag == $tag then .users[0].username = $user | .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     print_success "认证信息已修改"
                 fi
                 
@@ -4293,7 +4293,7 @@ modify_anytls_node() {
         echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
         echo ""
         
-        local inbound=$(jq -c '.inbounds[] | select(.tag == "'"${tag}"'")' "${CONFIG_FILE}" 2>/dev/null)
+        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
         local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
         local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
         
@@ -4329,11 +4329,11 @@ modify_anytls_node() {
                         continue
                     fi
                     
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .listen_port = '"${new_port}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_PORTS[$idx]="$new_port"
                     
                     local new_tag="anytls-in-${new_port}"
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tag = "'"${new_tag}"' else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg newtag "$new_tag" '.inbounds |= map(if .tag == $tag then .tag = $newtag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_TAGS[$idx]="$new_tag"
                     
                     tag="$new_tag"
@@ -4352,7 +4352,7 @@ modify_anytls_node() {
                 read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
                 
                 if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
-                    jq '.inbounds |= map(if .tag == "'"${tag}"' then .tls.server_name = "'"${new_sni}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
                 else
@@ -4371,7 +4371,7 @@ modify_anytls_node() {
                     print_info "已随机生成密码: ${new_password}"
                 fi
                 
-                jq '.inbounds |= map(if .tag == "'"${tag}"' then .users[0].password = "'"${new_password}"'" else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+                jq --arg tag "$tag" --arg pwd "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pwd else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                 print_success "密码已修改"
                 
                 read -p "按回车继续..." _
@@ -4432,10 +4432,10 @@ delete_inbound_by_tag() {
     fi
     
     # 从配置文件中删除入站
-    jq '.inbounds |= map(select(.tag != "'"${tag_to_delete}"'"))' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+    jq --arg tag "$tag_to_delete" '.inbounds |= map(select(.tag != $tag))' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
     
     # 更新路由规则
-    jq '.route.rules |= map(if .inbound then .inbound |= map(select(. != "'"${tag_to_delete}"'")) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+    jq --arg tag "$tag_to_delete" '.route.rules |= map(if .inbound then .inbound |= map(select(. != $tag)) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
     
     # 从内存数组中删除
     for i in "${!INBOUND_TAGS[@]}"; do
