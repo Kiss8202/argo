@@ -382,7 +382,6 @@ ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=infinity
-Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
 
 [Install]
 WantedBy=multi-user.target
@@ -422,10 +421,8 @@ gen_keys() {
     if [[ -f "${KEY_FILE}" ]] && [[ -r "${KEY_FILE}" ]]; then
         print_info "从文件加载已保存的密钥..."
         while IFS='=' read -r key value; do
-            # 去除值两端的引号
             value="${value#\"}"
             value="${value%\"}"
-            # 跳过注释和空行
             [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
             case "$key" in
                 REALITY_PRIVATE) REALITY_PRIVATE="$value" ;;
@@ -444,9 +441,7 @@ gen_keys() {
     SHORT_ID=$(openssl rand -hex 8)
     print_info "Reality Short ID 已自动生成: ${SHORT_ID}"
     print_info "如需修改 Short ID，可在添加节点时自定义"
-
     save_keys_to_file
-    
     print_success "密钥生成完成"
 }
 
@@ -459,7 +454,8 @@ REALITY_PUBLIC="${REALITY_PUBLIC}"
 SHORT_ID="${SHORT_ID}"
 EOF
     
-    chmod 600 "${KEY_FILE}" 2>/dev/null || true
+    chmod 600 "${KEY_FILE}"
+    print_success "密钥已保存到 ${KEY_FILE}"
 }
 
 # ==================== 链接文件管理 ====================
@@ -474,6 +470,7 @@ save_links_to_files() {
     echo -en "${HTTPS_LINKS}" > "${HTTPS_LINKS_FILE}"
     echo -en "${ANYTLS_LINKS}" > "${ANYTLS_LINKS_FILE}"
     
+    chmod 600 "${LINK_DIR}"/*.txt 2>/dev/null || true
     chmod 700 "${LINK_DIR}" 2>/dev/null || true
     print_success "链接已保存到 ${LINK_DIR}"
 }
@@ -574,32 +571,41 @@ load_inbounds_from_config() {
     
     INBOUNDS_JSON="$inbound_list"
     
-    # 从路由规则中恢复中转配置（只处理入站中转规则，忽略分流域名规则）
+    # 从路由规则中恢复每个节点的默认中转（查找针对该入站且没有域名/IP条件的规则）
+    # 注意：路由规则中可能有多个匹配该入站，需要找到最后一条没有域名/IP的规则作为默认
     local route_rules=$(jq -c '.route.rules[]? // empty' "${CONFIG_FILE}" 2>/dev/null)
     if [[ -n "$route_rules" ]]; then
+        # 先收集所有入站对应的默认中转（无域名/IP条件）
+        declare -A default_relay
         while IFS= read -r rule; do
-            # 检查是否为入站中转规则（只处理包含inbound字段且不包含域名/IP匹配字段的规则）
+            # 检查是否包含 inbound 字段
             local has_inbound=$(echo "$rule" | jq -e '.inbound // empty' 2>/dev/null)
+            if [[ -z "$has_inbound" ]]; then
+                continue
+            fi
+            # 检查是否包含域名或IP条件（如果包含，则是分流规则，跳过）
             local has_domain=$(echo "$rule" | jq -e '.domain // .domain_suffix // .domain_keyword // .domain_regex // empty' 2>/dev/null)
             local has_ip=$(echo "$rule" | jq -e '.ip_cidr // .ip // empty' 2>/dev/null)
-            
-            # 只处理入站中转规则，忽略域名/IP分流规则
-            if [[ -n "$has_inbound" && -z "$has_domain" && -z "$has_ip" ]]; then
-                local inbound_array=$(echo "$rule" | jq -r '.inbound[]? // empty' 2>/dev/null)
-                local outbound=$(echo "$rule" | jq -r '.outbound // ""' 2>/dev/null)
-                
-                if [[ -n "$outbound" && "$outbound" != "direct" ]]; then
-                    while IFS= read -r inbound_tag; do
-                        for i in "${!INBOUND_TAGS[@]}"; do
-                            if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
-                                INBOUND_RELAY_TAGS[$i]="$outbound"
-                                break
-                            fi
-                        done
-                    done <<< "$inbound_array"
-                fi
+            if [[ -n "$has_domain" || -n "$has_ip" ]]; then
+                continue
+            fi
+            # 这是一个默认路由规则
+            local inbound_array=$(echo "$rule" | jq -r '.inbound[]? // empty' 2>/dev/null)
+            local outbound=$(echo "$rule" | jq -r '.outbound // ""' 2>/dev/null)
+            if [[ -n "$outbound" && "$outbound" != "direct" ]]; then
+                while IFS= read -r inbound_tag; do
+                    default_relay["$inbound_tag"]="$outbound"
+                done <<< "$inbound_array"
             fi
         done <<< "$route_rules"
+        
+        # 应用到 INBOUND_RELAY_TAGS
+        for i in "${!INBOUND_TAGS[@]}"; do
+            local tag="${INBOUND_TAGS[$i]}"
+            if [[ -n "${default_relay[$tag]}" ]]; then
+                INBOUND_RELAY_TAGS[$i]="${default_relay[$tag]}"
+            fi
+        done
     fi
     
     return 0
@@ -617,9 +623,18 @@ regenerate_links_from_config() {
     HTTPS_LINKS=""
     ANYTLS_LINKS=""
     
-    # 加载密钥文件
+    # 加载密钥文件（安全读取，避免代码注入）
     if [[ -f "${KEY_FILE}" ]]; then
-        source "${KEY_FILE}"
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            value="${value#\"}"
+            value="${value%\"}"
+            case "$key" in
+                REALITY_PRIVATE) REALITY_PRIVATE="$value" ;;
+                REALITY_PUBLIC) REALITY_PUBLIC="$value" ;;
+                SHORT_ID) SHORT_ID="$value" ;;
+            esac
+        done < "${KEY_FILE}"
     fi
     
     # 确保 SERVER_IP 已设置
@@ -775,8 +790,7 @@ regenerate_links_from_config() {
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
                 if [[ -n "$shadowtls_password" ]]; then
-                    local ss_tag="shadowsocks-in-${port}"
-                    local ss_inbound=$(jq --arg tag "$ss_tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
+                    local ss_inbound=$(jq -c ".inbounds[] | select(.tag == \"shadowsocks-in-${port}\")" "${CONFIG_FILE}" 2>/dev/null)
                     local ss_password=$(echo "$ss_inbound" | jq -r '.password // ""' 2>/dev/null)
                     local ss_method=$(echo "$ss_inbound" | jq -r '.method // "2022-blake3-aes-128-gcm"' 2>/dev/null)
                     
@@ -992,6 +1006,8 @@ EOF
 load_ip_config() {
     if [[ -f "${IP_CONFIG_FILE}" ]] && [[ -r "${IP_CONFIG_FILE}" ]]; then
         while IFS='=' read -r key value; do
+            # 跳过注释和空行
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
             # 去除值两端的引号
             value="${value#\"}"
             value="${value%\"}"
@@ -1157,11 +1173,11 @@ get_ip() {
             print_success "使用 IPv4: ${SERVER_IP}"
         fi
     elif [[ -n "$ipv6" ]]; then
-        SERVER_IP="$ipv6"
-        SERVER_IPV6=""
-        [[ -z "$INBOUND_IP_MODE" ]] && INBOUND_IP_MODE="ipv6"
-        [[ -z "$OUTBOUND_IP_MODE" ]] && OUTBOUND_IP_MODE="dual"
-        print_success "使用 IPv6: ${SERVER_IP}"
+        SERVER_IP=""
+        SERVER_IPV6="$ipv6"
+        INBOUND_IP_MODE="ipv6"
+        [[ -z "$OUTBOUND_IP_MODE" || "$OUTBOUND_IP_MODE" == "dual" ]] && OUTBOUND_IP_MODE="dual"
+        print_success "仅 IPv6 网络: ${SERVER_IPV6}"
         print_info "已自动设置入站为 IPv6，出站为双栈模式"
     fi
     
@@ -1252,10 +1268,12 @@ setup_reality() {
     read -p "SNI域名 [${DEFAULT_SNI}]: " SNI
     SNI=${SNI:-${DEFAULT_SNI}}
     
+    # 每个节点使用独立UUID
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-
+    print_info "节点 UUID: ${NODE_UUID}"
+    
     print_info "生成配置文件..."
-
+    
     local listen_addr=$(get_listen_address)
     local inbound="{
   \"type\": \"vless\",
@@ -1338,9 +1356,11 @@ setup_hysteria2() {
     print_info "为 ${HY2_SNI} 生成自签证书..."
     gen_cert_for_sni "${HY2_SNI}"
     
-    local NODE_HY2_PASSWORD=$(openssl rand -hex 16)
-
     print_info "生成配置文件..."
+    
+    # 每个节点使用独立密码
+    local NODE_HY2_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_HY2_PASSWORD}"
     
     # 构建 obfs 配置
     local obfs_config=""
@@ -1423,10 +1443,11 @@ setup_socks5() {
     read -p "是否启用认证? [Y/n]: " ENABLE_AUTH
     ENABLE_AUTH=${ENABLE_AUTH:-Y}
     
+    print_info "生成配置文件..."
+    
+    # 每个节点使用独立凭据
     local NODE_SOCKS_USER="user_$(openssl rand -hex 4)"
     local NODE_SOCKS_PASS=$(openssl rand -hex 16)
-
-    print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
     
@@ -1505,11 +1526,14 @@ setup_shadowtls() {
     read -p "SNI域名 [${DEFAULT_SNI}]: " SHADOWTLS_SNI
     SHADOWTLS_SNI=${SHADOWTLS_SNI:-${DEFAULT_SNI}}
     
-    local NODE_SHADOWTLS_PASSWORD=$(openssl rand -hex 16)
-    local NODE_SS_PASSWORD=$(openssl rand -base64 32)
-
     print_info "生成配置文件..."
     print_warning "ShadowTLS 通过伪装真实域名的TLS握手工作"
+    
+    # 每个节点使用独立密码
+    local NODE_SHADOWTLS_PASSWORD=$(openssl rand -hex 16)
+    local NODE_SS_PASSWORD=$(openssl rand -base64 16)
+    print_info "ShadowTLS密码: ${NODE_SHADOWTLS_PASSWORD}"
+    print_info "Shadowsocks密码: ${NODE_SS_PASSWORD}"
     
     local listen_addr=$(get_listen_address)
     local inbound="{
@@ -1757,8 +1781,10 @@ setup_https() {
     print_info "为 ${HTTPS_SNI} 生成自签证书..."
     gen_cert_for_sni "${HTTPS_SNI}"
     
+    # 每个节点使用独立UUID
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-
+    print_info "节点 UUID: ${NODE_UUID}"
+    
     print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
@@ -1813,24 +1839,53 @@ setup_https() {
     save_links_to_files
 }
 
-# ==================== AnyTLS 配置（已修复混淆显示 + 随机填充 + UDP 提示） ====================
+# ==================== AnyTLS 配置（支持内嵌 REALITY，修正版） ====================
 setup_anytls() {
     echo ""
     read_port_with_check 443
-    
-    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+
+    echo -e "${YELLOW}是否启用 REALITY 伪装？(y/N)${NC}"
+    echo -e "${CYAN}启用后，服务端使用 AnyTLS+REALITY，客户端需使用 sing-box 并导入 JSON 配置${NC}"
+    read -p "启用 REALITY? [y/N]: " ENABLE_REALITY
+    ENABLE_REALITY=${ENABLE_REALITY:-N}
+
+    echo -e "${YELLOW}请输入 SNI 域名（用于 TLS 及 REALITY handshake）${NC}"
     echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
-    read -p "SNI域名 [${DEFAULT_SNI}]: " ANYTLS_SNI
+    read -p "SNI 域名 [${DEFAULT_SNI}]: " ANYTLS_SNI
     ANYTLS_SNI=${ANYTLS_SNI:-${DEFAULT_SNI}}
-    
-    # 是否启用填充混淆（修复：默认 Y，按回车也视为 Y）
-    read -p "是否启用随机填充混淆 (推荐)？[Y/n]: " ENABLE_PADDING
-    ENABLE_PADDING=${ENABLE_PADDING:-Y}
-    local padding_config=""
-    local padding_status="未启用"
-    # 修复：只要不是明确的 n/N，都视为启用
-    if [[ ! "$ENABLE_PADDING" =~ ^[Nn]$ ]]; then
-        padding_config="[
+
+    # 每个节点使用独立密码
+    local NODE_ANYTLS_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_ANYTLS_PASSWORD}"
+
+    # 如果启用 REALITY，确保 REALITY 密钥对存在
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        if [[ -z "$REALITY_PRIVATE" ]]; then
+            KEYS=$(${INSTALL_DIR}/sing-box generate reality-keypair 2>/dev/null)
+            REALITY_PRIVATE=$(echo "$KEYS" | grep "PrivateKey" | awk '{print $2}')
+            REALITY_PUBLIC=$(echo "$KEYS" | grep "PublicKey" | awk '{print $2}')
+            SHORT_ID=$(openssl rand -hex 8)
+            save_keys_to_file
+        fi
+        print_info "REALITY 公钥: ${REALITY_PUBLIC}"
+        print_info "Short ID: ${SHORT_ID}"
+    else
+        # 纯 AnyTLS 需要自签证书
+        gen_cert_for_sni "${ANYTLS_SNI}"
+        # 询问是否允许不安全连接
+        echo -e "${YELLOW}是否允许跳过证书验证（insecure）？${NC}"
+        echo -e "${CYAN}允许可以简化客户端配置，但会降低安全性（中间人攻击风险）${NC}"
+        read -p "允许 insecure? [y/N]: " ALLOW_INSECURE
+        ALLOW_INSECURE=${ALLOW_INSECURE:-N}
+    fi
+
+    # 询问 uTLS 指纹（可选）
+    echo -e "${YELLOW}请输入 uTLS 指纹（默认 chrome，可选: firefox, safari, ios, android）${NC}"
+    read -p "指纹 [chrome]: " UTLS_FINGERPRINT
+    UTLS_FINGERPRINT=${UTLS_FINGERPRINT:-chrome}
+
+    # 构建 padding_scheme（默认启用随机填充）
+    local padding_config="[
     \"stop=8\",
     \"0=30-30\",
     \"1=100-400\",
@@ -1841,22 +1896,95 @@ setup_anytls() {
     \"6=500-1000\",
     \"7=500-1000\"
   ]"
-        padding_status="已启用 (官方默认)"
-        print_info "已启用随机填充混淆（官方默认策略）"
-    else
-        padding_config="[]"
-        print_info "未启用填充混淆（可能会被深度包检测识别）"
-    fi
-    
-    print_info "为 ${ANYTLS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${ANYTLS_SNI}"
-    
-    local NODE_ANYTLS_PASSWORD=$(openssl rand -hex 16)
 
-    print_info "生成配置文件..."
-    
     local listen_addr=$(get_listen_address)
-    local inbound="{
+    local inbound=""
+    local PROTO=""
+    local EXTRA_INFO=""
+    local LINK=""
+    local CLIENT_JSON_PATH=""
+
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        # AnyTLS + REALITY 入站（无需证书）
+        inbound="{
+  \"type\": \"anytls\",
+  \"tag\": \"anytls-reality-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_ANYTLS_PASSWORD}\"}],
+  \"padding_scheme\": ${padding_config},
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${ANYTLS_SNI}\",
+    \"reality\": {
+      \"enabled\": true,
+      \"handshake\": {
+        \"server\": \"${ANYTLS_SNI}\",
+        \"server_port\": 443
+      },
+      \"private_key\": \"${REALITY_PRIVATE}\",
+      \"short_id\": [\"${SHORT_ID}\"]
+    }
+  }
+}"
+        PROTO="AnyTLS+REALITY"
+        EXTRA_INFO="密码: ${NODE_ANYTLS_PASSWORD}\nREALITY 公钥: ${REALITY_PUBLIC}\nShort ID: ${SHORT_ID}\nSNI: ${ANYTLS_SNI}"
+
+        # 生成客户端 JSON 配置文件（sing-box 格式），并根据系统选择 TUN 栈
+        local tun_stack="system"
+        if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]]; then
+            tun_stack="gvisor"
+        fi
+        CLIENT_JSON_PATH="${LINK_DIR}/anytls_reality_client_${PORT}.json"
+        cat > "${CLIENT_JSON_PATH}" << EOF
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "sing-box0",
+      "address": ["172.19.0.1/30", "fd00::1/126"],
+      "auto_route": true,
+      "stack": "${tun_stack}"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "anytls",
+      "tag": "AnyTLS+REALITY",
+      "server": "${SERVER_IP}",
+      "server_port": ${PORT},
+      "password": "${NODE_ANYTLS_PASSWORD}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${ANYTLS_SNI}",
+        "utls": { "enabled": true, "fingerprint": "${UTLS_FINGERPRINT}" },
+        "reality": {
+          "enabled": true,
+          "public_key": "${REALITY_PUBLIC}",
+          "short_id": "${SHORT_ID}"
+        }
+      }
+    },
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
+  ],
+  "route": {
+    "final": "AnyTLS+REALITY",
+    "auto_detect_interface": true
+  }
+}
+EOF
+        chmod 644 "${CLIENT_JSON_PATH}"
+        LINK="请使用 sing-box 客户端，配置文件已保存到: ${CLIENT_JSON_PATH}"
+    else
+        # 纯 AnyTLS 入站（需要证书）
+        local insecure_bool="false"
+        if [[ "$ALLOW_INSECURE" =~ ^[Yy]$ ]]; then
+            insecure_bool="true"
+        fi
+        inbound="{
   \"type\": \"anytls\",
   \"tag\": \"anytls-in-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -1870,42 +1998,41 @@ setup_anytls() {
     \"key_path\": \"${CERT_DIR}/${ANYTLS_SNI}/private.key\"
   }
 }"
-    
+        PROTO="AnyTLS"
+        EXTRA_INFO="密码: ${NODE_ANYTLS_PASSWORD}\n证书: 自签证书 (${ANYTLS_SNI})"
+        # 生成 anytls:// 链接，insecure 根据用户选择
+        LINK="anytls://${NODE_ANYTLS_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&fp=${UTLS_FINGERPRINT}&insecure=${insecure_bool}&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-${SERVER_IP}"
+    fi
+
+    # 并入全局 inbound JSON
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
     else
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
-    
-    PROTO="AnyTLS"
-    EXTRA_INFO="密码: ${NODE_ANYTLS_PASSWORD}\n自签证书: ${ANYTLS_SNI}\nSNI: ${ANYTLS_SNI}\n填充混淆: ${padding_status}"
-    EXTRA_INFO="${EXTRA_INFO}\n\n${GREEN}UDP 支持:${NC} AnyTLS 原生支持 UDP-over-TCP，请在客户端开启 UDP 转发即可使用。"
-    
-    # 保存新添加节点的链接（只用于显示）
-    CURRENT_NEW_LINKS=""
-    
-    # IPv4 链接
-    local link_ipv4="anytls://${NODE_ANYTLS_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&fp=chrome&insecure=1&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-${SERVER_IP}"
-    add_link "$link_ipv4" "AnyTLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${ANYTLS_SNI}"
-    LINK="$link_ipv4"  # 默认链接
-    
-    # 添加到新链接显示
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[AnyTLS] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
-    
-    # IPv6 链接（如果有）
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="anytls://${NODE_ANYTLS_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&fp=chrome&insecure=1&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "AnyTLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${ANYTLS_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[AnyTLS] [${SERVER_IPV6}]:${PORT} (SNI: ${ANYTLS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
-    fi
-    
-    INBOUND_TAGS+=("anytls-in-${PORT}")
+
+    # 记录节点信息
+    INBOUND_TAGS+=("anytls-${PORT}")
     INBOUND_PORTS+=("${PORT}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${ANYTLS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
-    
-    print_success "AnyTLS 配置完成 (SNI: ${ANYTLS_SNI}, 填充混淆: ${padding_status})"
+
+    # 显示新添加节点的信息（不再调用 add_link 传入无效链接）
+    CURRENT_NEW_LINKS=""
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n客户端配置文件: ${CLIENT_JSON_PATH}\n----------------------------------------\n\n"
+        # 不调用 add_link，因为 JSON 不是标准 URI
+    else
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n${LINK}\n----------------------------------------\n\n"
+        add_link "$LINK" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${ANYTLS_SNI}"
+    fi
+
+    print_success "AnyTLS 节点添加完成 (REALITY: ${ENABLE_REALITY})"
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}客户端配置 JSON 已保存到: ${CLIENT_JSON_PATH}${NC}"
+        echo -e "${CYAN}请使用 sing-box 客户端运行: sing-box run -c ${CLIENT_JSON_PATH}${NC}"
+    fi
     save_links_to_files
 }
 # ==================== 中转链接解析 ====================
@@ -2156,52 +2283,97 @@ parse_vless_link() {
     local server_port_params=$(echo "$data" | cut -d'@' -f2)
     local server=$(echo "$server_port_params" | cut -d':' -f1)
     local port_params=$(echo "$server_port_params" | cut -d':' -f2)
-    local port=$(echo "$port_params" | cut -d'?' -f1)
-    
-    local params=$(echo "$port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
-    
+    # 清理端口：去掉 ? 及之后，再去掉 / 及之后
+    local port=$(echo "$port_params" | cut -d'?' -f1 | sed 's|/.*||')
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    local params=$(echo "$server_port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
+
     local security="none"
     local sni=""
     local flow=""
-    
+    local pbk=""
+    local sid=""
+    local encryption="none"
+
     if [[ -n "$params" ]]; then
-        [[ "$params" =~ security=([^&]+) ]] && security="${BASH_REMATCH[1]}"
-        [[ "$params" =~ sni=([^&]+) ]] && sni="${BASH_REMATCH[1]}"
-        [[ "$params" =~ flow=([^&]+) ]] && flow="${BASH_REMATCH[1]}"
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                security) security="$value" ;;
+                sni) sni="$value" ;;
+                flow) flow="$value" ;;
+                pbk) pbk="$value" ;;
+                sid) sid="$value" ;;
+                encryption) encryption="$value" ;;
+            esac
+        done
     fi
-    
+
     local tls_config=""
-    if [[ "$security" == "tls" || "$security" == "reality" ]]; then
+    local reality_config=""
+    if [[ "$security" == "tls" ]]; then
         tls_config=",
   \"tls\": {
     \"enabled\": true,
-    \"server_name\": \"${sni}\"
+    \"server_name\": \"${sni}\",
+    \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"}
+  }"
+    elif [[ "$security" == "reality" ]]; then
+        if [[ -z "$pbk" ]]; then
+            print_error "REALITY 链接缺少公钥 (pbk)"
+            return 1
+        fi
+        reality_config=",
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"},
+    \"reality\": {
+      \"enabled\": true,
+      \"public_key\": \"${pbk}\",
+      \"short_id\": \"${sid}\"
+    }
   }"
     fi
-    
+
     local flow_config=""
     [[ -n "$flow" ]] && flow_config=",
   \"flow\": \"${flow}\""
-    
+
+    local encryption_config=""
+    [[ "$encryption" != "none" ]] && encryption_config=",
+  \"encryption\": \"${encryption}\""
+
     local tag="relay-vless-${#RELAY_TAGS[@]}"
     local relay_json="{
   \"type\": \"vless\",
   \"tag\": \"${tag}\",
   \"server\": \"${server}\",
   \"server_port\": ${port},
-  \"uuid\": \"${uuid}\"${flow_config}${tls_config}
+  \"uuid\": \"${uuid}\"${encryption_config}${flow_config}${tls_config}${reality_config}
 }"
+
     local relay_desc
     if [[ -n "$custom_desc" ]]; then
         relay_desc="$custom_desc"
     else
-        relay_desc="VLESS ${server}:${port}"
+        if [[ "$security" == "reality" ]]; then
+            relay_desc="VLESS+REALITY ${server}:${port} (SNI: ${sni})"
+        else
+            relay_desc="VLESS ${server}:${port}"
+        fi
     fi
-    
+
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
     RELAY_DESCS+=("$relay_desc")
-    
+
     save_relays_to_file
     print_success "VLESS 中转已添加: ${relay_desc}"
 }
@@ -2248,6 +2420,164 @@ parse_trojan_link() {
     print_success "Trojan 中转已添加: ${relay_desc}"
 }
 
+parse_hysteria2_link() {
+    local link="$1"
+    local custom_desc="$2"
+
+    # 去除协议前缀 (hy2:// 或 hysteria2://)
+    local data="${link#*://}"
+    # 提取密码 (第一个 @ 之前)
+    local userinfo="${data%%@*}"
+    local rest="${data#*@}"
+    # 提取服务器和端口 (第一个 : 分割，但要注意 IPv6 地址)
+    # 先处理可能的 IPv6 地址 [::1] 的情况，简单起见假设是普通域名/IPv4
+    local server="${rest%%:*}"
+    local port_and_params="${rest#*:}"
+    # 提取端口（第一个 ? 之前，且去除结尾的 / 或 ? 后的部分）
+    local port="${port_and_params%%[?/]*}"
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    # 提取参数部分
+    local params=""
+    if [[ "$port_and_params" == *"?"* ]]; then
+        params="${port_and_params#*?}"
+        params="${params%%#*}"  # 去除可能的 # 备注
+    fi
+
+    # 默认值
+    local password="$userinfo"
+    local sni=""
+    local insecure="false"
+    local obfs_type=""
+    local obfs_password=""
+
+    # 解析参数
+    if [[ -n "$params" ]]; then
+        # 按 & 分割
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                sni) sni="$value" ;;
+                insecure) insecure="$value" ;;
+                obfs) obfs_type="$value" ;;
+                obfs-password) obfs_password="$value" ;;
+            esac
+        done
+    fi
+
+    # 转换 insecure 为布尔值
+    local insecure_bool="false"
+    [[ "$insecure" == "1" || "$insecure" == "true" ]] && insecure_bool="true"
+
+    # 构建 tls 配置
+    local tls_config="{
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"insecure\": ${insecure_bool}
+  }"
+    local obfs_config=""
+    if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
+        obfs_config=",
+  \"obfs\": {
+    \"type\": \"salamander\",
+    \"password\": \"${obfs_password}\"
+  }"
+    fi
+
+    local tag="relay-hysteria2-${#RELAY_TAGS[@]}"
+    local relay_json="{
+  \"type\": \"hysteria2\",
+  \"tag\": \"${tag}\",
+  \"server\": \"${server}\",
+  \"server_port\": ${port},
+  \"password\": \"${password}\",
+  \"tls\": ${tls_config}${obfs_config}
+}"
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="Hysteria2 ${server}:${port} (SNI: ${sni})"
+    fi
+
+    RELAY_TAGS+=("$tag")
+    RELAY_JSONS+=("$relay_json")
+    RELAY_DESCS+=("$relay_desc")
+
+    save_relays_to_file
+    print_success "Hysteria2 中转已添加: ${relay_desc}"
+}
+
+parse_anytls_link() {
+    local link="$1"
+    local custom_desc="$2"
+    local data=$(echo "$link" | sed 's|anytls://||')
+    local userinfo=$(echo "$data" | cut -d'@' -f1)
+    local server_port_params=$(echo "$data" | cut -d'@' -f2)
+    local server=$(echo "$server_port_params" | cut -d':' -f1)
+    local port_params=$(echo "$server_port_params" | cut -d':' -f2)
+    local port=$(echo "$port_params" | cut -d'?' -f1 | sed 's|/.*||')
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    local params=$(echo "$server_port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
+    local password="$userinfo"
+    local sni=""
+    local insecure="false"
+
+    if [[ -n "$params" ]]; then
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                sni) sni="$value" ;;
+                insecure) insecure="$value" ;;
+            esac
+        done
+    fi
+
+    # 转换为布尔值
+    local insecure_bool="false"
+    [[ "$insecure" == "1" || "$insecure" == "true" ]] && insecure_bool="true"
+
+    local tag="relay-anytls-${#RELAY_TAGS[@]}"
+    local relay_json="{
+  \"type\": \"anytls\",
+  \"tag\": \"${tag}\",
+  \"server\": \"${server}\",
+  \"server_port\": ${port},
+  \"password\": \"${password}\",
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"insecure\": ${insecure_bool}
+  }
+}"
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="AnyTLS ${server}:${port} (SNI: ${sni})"
+    fi
+
+    RELAY_TAGS+=("$tag")
+    RELAY_JSONS+=("$relay_json")
+    RELAY_DESCS+=("$relay_desc")
+
+    save_relays_to_file
+    print_success "AnyTLS 中转已添加: ${relay_desc}"
+}
+
 setup_relay() {
     # 加载中转配置和分流规则
     load_relays_from_file
@@ -2277,9 +2607,10 @@ setup_relay() {
         echo -e "  ${GREEN}[2]${NC} 为节点配置中转"
         echo -e "  ${GREEN}[3]${NC} 删除中转链接"
         echo -e "  ${GREEN}[4]${NC} 域名分流配置"
+        echo -e "  ${GREEN}[5]${NC} 修改中转链接"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-4]: " r_choice
+        read -p "请选择 [0-5]: " r_choice
         
         case $r_choice in
             1)
@@ -2321,6 +2652,16 @@ setup_relay() {
                 echo -e "     trojan://password@1.2.3.4:443?sni=example.com"
                 echo -e "   ${YELLOW}支持参数:${NC} sni, type, security 等"
                 echo ""
+                echo -e "${GREEN}7. Hysteria2${NC}"
+                echo -e "   ${YELLOW}格式:${NC} hysteria2://密码@服务器:端口?参数"
+                echo -e "   ${CYAN}示例:${NC}"
+                echo -e "     hysteria2://password@1.2.3.4:443?insecure=1&sni=example.com&obfs=salamander&obfs-password=xxx"
+                echo ""
+                echo -e "${GREEN}8. AnyTLS${NC}"
+                echo -e "   ${YELLOW}格式:${NC} anytls://密码@服务器:端口?参数"
+                echo -e "   ${CYAN}示例:${NC}"
+                echo -e "     anytls://password@1.2.3.4:443?insecure=1&sni=example.com"
+                echo ""
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -e "${YELLOW}提示:${NC} 直接粘贴完整的节点分享链接即可，脚本会自动识别协议类型"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -2345,6 +2686,10 @@ setup_relay() {
                         parse_vless_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^trojan:// ]]; then
                         parse_trojan_link "$RELAY_LINK" "$custom_desc"
+                    elif [[ "$RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
+                        parse_hysteria2_link "$RELAY_LINK" "$custom_desc"
+                    elif [[ "$RELAY_LINK" =~ ^anytls:// ]]; then
+                        parse_anytls_link "$RELAY_LINK"
                     else
                         print_error "不支持的链接格式"
                     fi
@@ -2517,6 +2862,115 @@ setup_relay() {
             4)
                 domain_route_menu
                 ;;
+            5)
+                if [[ ${#RELAY_TAGS[@]} -eq 0 ]]; then
+                    print_warning "当前没有中转链接"
+                    continue
+                fi
+                
+                echo ""
+                echo -e "${CYAN}修改中转链接:${NC}"
+                for i in "${!RELAY_TAGS[@]}"; do
+                    idx=$((i+1))
+                    echo -e "  ${GREEN}[${idx}]${NC} ${RELAY_DESCS[$i]}"
+                done
+                echo ""
+                read -p "请选择要修改的中转 (输入 -1 取消): " edit_idx
+                
+                if [[ "$edit_idx" == "-1" ]]; then
+                    continue
+                fi
+                
+                if ! [[ "$edit_idx" =~ ^[0-9]+$ ]] || (( edit_idx < 1 || edit_idx > ${#RELAY_TAGS[@]} )); then
+                    print_error "无效选择"
+                    continue
+                fi
+                
+                local e=$((edit_idx-1))
+                local old_tag="${RELAY_TAGS[$e]}"
+                local old_desc="${RELAY_DESCS[$e]}"
+                
+                echo ""
+                echo -e "${YELLOW}当前中转: ${old_desc}${NC}"
+                echo -e "${CYAN}请输入新的中转链接 (保留原tag，分流和中转配置不受影响):${NC}"
+                echo ""
+                read -p "粘贴新的中转链接: " NEW_RELAY_LINK
+                
+                if [[ -z "$NEW_RELAY_LINK" ]]; then
+                    print_warning "未提供链接，修改取消"
+                    continue
+                fi
+                
+                echo ""
+                read -p "请输入新的描述信息 (留空则自动生成): " new_custom_desc
+                
+                # 临时保存当前数组状态（解析失败时恢复）
+                local saved_tags=("${RELAY_TAGS[@]}")
+                local saved_jsons=("${RELAY_JSONS[@]}")
+                local saved_descs=("${RELAY_DESCS[@]}")
+                
+                # 临时清空数组，解析新链接以获取JSON结构
+                local tmp_tags=("${RELAY_TAGS[@]}")
+                local tmp_jsons=("${RELAY_JSONS[@]}")
+                local tmp_descs=("${RELAY_DESCS[@]}")
+                RELAY_TAGS=()
+                RELAY_JSONS=()
+                RELAY_DESCS=()
+                
+                # 解析新链接
+                local parse_ok=0
+                if [[ "$NEW_RELAY_LINK" =~ ^socks ]]; then
+                    parse_socks_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^https? ]]; then
+                    parse_http_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^ss:// ]]; then
+                    parse_ss_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^vmess:// ]]; then
+                    parse_vmess_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^vless:// ]]; then
+                    parse_vless_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^trojan:// ]]; then
+                    parse_trojan_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
+                    parse_hysteria2_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^anytls:// ]]; then
+                    parse_anytls_link "$NEW_RELAY_LINK" && parse_ok=1
+                else
+                    print_error "不支持的链接格式"
+                fi
+                
+                if [[ $parse_ok -eq 1 ]]; then
+                    # 从解析结果中提取新JSON和新描述
+                    local new_json="${RELAY_JSONS[0]}"
+                    local new_desc="${RELAY_DESCS[0]}"
+                    
+                    # 将新JSON中的tag替换为原tag
+                    local new_tag="${RELAY_TAGS[0]}"
+                    new_json=$(echo "$new_json" | sed "s/\"${new_tag}\"/\"${old_tag}\"/g")
+                    
+                    # 恢复原数组，替换指定位置
+                    RELAY_TAGS=("${tmp_tags[@]}")
+                    RELAY_JSONS=("${tmp_jsons[@]}")
+                    RELAY_DESCS=("${tmp_descs[@]}")
+                    
+                    RELAY_JSONS[$e]="$new_json"
+                    RELAY_DESCS[$e]="$new_desc"
+                    
+                    save_relays_to_file
+                    print_success "中转已修改: ${old_desc} → ${new_desc}"
+                    
+                    # 重新生成配置
+                    if [[ -n "$INBOUNDS_JSON" ]]; then
+                        generate_config && start_svc
+                    fi
+                else
+                    # 解析失败，恢复原数组
+                    RELAY_TAGS=("${saved_tags[@]}")
+                    RELAY_JSONS=("${saved_jsons[@]}")
+                    RELAY_DESCS=("${saved_descs[@]}")
+                    print_error "新链接解析失败，中转配置未修改"
+                fi
+                ;;
             0)
                 break
                 ;;
@@ -2548,13 +3002,14 @@ ip_config_menu() {
         echo -e "  ${GREEN}[2]${NC} 设置入站为 IPv6"
         echo -e "  ${GREEN}[3]${NC} 设置入站为双栈 (IPv4+IPv6)"
         echo -e "  ${GREEN}[4]${NC} 设置出站为 IPv4"
-        echo -e "  ${GREEN}[5]${NC} 设置出站为 IPv6"
-        echo -e "  ${GREEN}[6]${NC} 设置出站为双栈 (IPv4+IPv6)"
-        echo -e "  ${GREEN}[7]${NC} 手动修改 IPv4 地址"
-        echo -e "  ${GREEN}[8]${NC} 手动修改 IPv6 地址"
+        echo -e "  ${GREEN}[5]${NC} 设置出站为 IPv6 (优先)"
+        echo -e "  ${GREEN}[6]${NC} 设置出站为仅 IPv6 (IPv4不出站)"
+        echo -e "  ${GREEN}[7]${NC} 设置出站为双栈 (IPv4+IPv6)"
+        echo -e "  ${GREEN}[8]${NC} 手动修改 IPv4 地址"
+        echo -e "  ${GREEN}[9]${NC} 手动修改 IPv6 地址"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-8]: " ip_choice
+        read -p "请选择 [0-9]: " ip_choice
         
         case $ip_choice in
             1)
@@ -2611,7 +3066,8 @@ ip_config_menu() {
                 fi
                 OUTBOUND_IP_MODE="ipv6"
                 save_ip_config
-                print_success "出站已设置为 IPv6"
+                print_success "出站已设置为 IPv6 优先"
+                echo -e "${YELLOW}提示: IPv6 优先出站，IPv6 不可用时回退到 IPv4${NC}"
                 echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
                 read -p "是否立即重新生成配置? (y/N): " regen
                 if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
@@ -2619,6 +3075,22 @@ ip_config_menu() {
                 fi
                 ;;
             6)
+                if [[ -z "$SERVER_IPV6" ]]; then
+                    print_error "未检测到 IPv6 地址，请先手动设置"
+                    read -p "按回车继续..." _
+                    continue
+                fi
+                OUTBOUND_IP_MODE="ipv6_only"
+                save_ip_config
+                print_success "出站已设置为仅 IPv6"
+                echo -e "${YELLOW}提示: 仅使用 IPv6 出站，IPv4 将无法出站${NC}"
+                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
+                read -p "是否立即重新生成配置? (y/N): " regen
+                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                    generate_config && start_svc
+                fi
+                ;;
+            7)
                 OUTBOUND_IP_MODE="dual"
                 save_ip_config
                 print_success "出站已设置为双栈 (IPv4+IPv6)"
@@ -2629,7 +3101,7 @@ ip_config_menu() {
                     generate_config && start_svc
                 fi
                 ;;
-            7)
+            8)
                 read -p "请输入 IPv4 地址: " new_ipv4
                 if [[ -n "$new_ipv4" ]]; then
                     SERVER_IP="$new_ipv4"
@@ -2638,7 +3110,7 @@ ip_config_menu() {
                     echo -e "${YELLOW}提示: 需要重新生成链接文件${NC}"
                 fi
                 ;;
-            8)
+            9)
                 read -p "请输入 IPv6 地址: " new_ipv6
                 if [[ -n "$new_ipv6" ]]; then
                     SERVER_IPV6="$new_ipv6"
@@ -2685,6 +3157,791 @@ clear_relay() {
     # 重新生成配置
     if [[ -n "$INBOUNDS_JSON" ]]; then
         generate_config && start_svc
+    fi
+}
+
+# ==================== Reality 节点修改 ====================
+modify_reality_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 Reality 节点:${NC}"
+    local reality_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "Reality" ]]; then
+            reality_nodes+=("$i")
+            echo -e "  ${GREEN}[${#reality_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#reality_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 Reality 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#reality_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${reality_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 Reality 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${INBOUND_SNIS[$array_idx]})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
+        echo -e "  ${GREEN}[4]${NC} 重新生成 Short ID"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="vless-in-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}"
+                ;;
+            3)
+                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+                jq --arg tag "$tag" --arg uuid "$new_uuid" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "UUID 已重新生成: ${new_uuid}"
+                ;;
+            4)
+                local new_sid=$(openssl rand -hex 8)
+                jq --arg tag "$tag" --arg sid "$new_sid" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.reality.short_id = [$sid])' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "Short ID 已重新生成: ${new_sid}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
+    fi
+}
+
+# ==================== Hysteria2 节点修改 ====================
+modify_hysteria2_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 Hysteria2 节点:${NC}"
+    local hy2_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "Hysteria2" ]]; then
+            hy2_nodes+=("$i")
+            echo -e "  ${GREEN}[${#hy2_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#hy2_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 Hysteria2 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#hy2_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${hy2_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 Hysteria2 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成密码"
+        echo -e "  ${GREEN}[4]${NC} 重新生成混淆密码"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="hy2-in-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                gen_cert_for_sni "${new_sni}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                ;;
+            3)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "密码已重新生成: ${new_password}"
+                ;;
+            4)
+                local new_obfs_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_obfs_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.obfs.password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "混淆密码已重新生成: ${new_obfs_password}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
+    fi
+}
+
+# ==================== SOCKS5 节点修改 ====================
+modify_socks5_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 SOCKS5 节点:${NC}"
+    local socks_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "SOCKS5" ]]; then
+            socks_nodes+=("$i")
+            echo -e "  ${GREEN}[${#socks_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#socks_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 SOCKS5 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#socks_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${socks_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    
+    # 读取当前用户名
+    local current_user=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).users[0].username // ""' "${CONFIG_FILE}")
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 SOCKS5 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改用户名 (当前: ${current_user:-无})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成密码"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="socks-in-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新用户名 (留空随机生成)${NC}"
+                read -p "用户名: " new_user
+                if [[ -z "$new_user" ]]; then
+                    new_user="user_$(openssl rand -hex 4)"
+                fi
+                jq --arg tag "$tag" --arg user "$new_user" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].username = $user)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                current_user="$new_user"
+                config_changed=1
+                print_success "用户名已修改为 ${new_user}"
+                ;;
+            3)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "密码已重新生成: ${new_password}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
+    fi
+}
+
+# ==================== ShadowTLS 节点修改 ====================
+modify_shadowtls_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 ShadowTLS 节点:${NC}"
+    local stls_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "ShadowTLS v3" ]]; then
+            stls_nodes+=("$i")
+            echo -e "  ${GREEN}[${#stls_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#stls_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 ShadowTLS 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#stls_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${stls_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 ShadowTLS 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成 ShadowTLS 密码"
+        echo -e "  ${GREEN}[4]${NC} 重新生成 SS 密码"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_stls_tag="shadowtls-in-${new_port}"
+                local new_ss_tag="shadowsocks-in-${new_port}"
+                local old_ss_tag="shadowsocks-in-${port}"
+                # Update shadowtls inbound tag, port, and detour
+                jq --arg old_tag "$tag" --arg new_tag "$new_stls_tag" --argjson new_port "$new_port" --arg new_ss_tag "$new_ss_tag" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port | .detour = $new_ss_tag)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                # Update shadowsocks inbound tag and detour reference
+                jq --arg old_ss_tag "$old_ss_tag" --arg new_ss_tag "$new_ss_tag" \
+                    '(.inbounds[] | select(.tag == $old_ss_tag)) |= (.tag = $new_ss_tag)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                # Update route rules
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_stls_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_stls_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_stls_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}，SS 标签和 detour 已同步更新"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.handshake.server = $sni)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，handshake.server 已同步更新"
+                ;;
+            3)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "ShadowTLS 密码已重新生成: ${new_password}"
+                ;;
+            4)
+                local new_ss_password=$(openssl rand -base64 16)
+                local ss_tag="shadowsocks-in-${port}"
+                jq --arg tag "$ss_tag" --arg password "$new_ss_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "SS 密码已重新生成: ${new_ss_password}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
+    fi
+}
+
+# ==================== HTTPS 节点修改 ====================
+modify_https_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 HTTPS 节点:${NC}"
+    local https_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "HTTPS" ]]; then
+            https_nodes+=("$i")
+            echo -e "  ${GREEN}[${#https_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#https_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 HTTPS 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#https_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${https_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 HTTPS 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="vless-tls-in-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                gen_cert_for_sni "${new_sni}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                ;;
+            3)
+                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+                jq --arg tag "$tag" --arg uuid "$new_uuid" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "UUID 已重新生成: ${new_uuid}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
+    fi
+}
+
+# ==================== AnyTLS 节点修改 ====================
+modify_anytls_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 AnyTLS 节点:${NC}"
+    local anytls_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "AnyTLS" || "${INBOUND_PROTOS[$i]}" == "AnyTLS+REALITY" ]]; then
+            anytls_nodes+=("$i")
+            echo -e "  ${GREEN}[${#anytls_nodes[@]}]${NC} 协议: ${INBOUND_PROTOS[$i]}, 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#anytls_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 AnyTLS 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#anytls_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${anytls_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local proto="${INBOUND_PROTOS[$array_idx]}"
+    
+    # 判断是否为 AnyTLS+REALITY 模式
+    local is_reality=0
+    if [[ "$proto" == "AnyTLS+REALITY" ]]; then
+        is_reality=1
+    fi
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成密码"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag
+                if [[ $is_reality -eq 1 ]]; then
+                    new_tag="anytls-reality-${new_port}"
+                else
+                    new_tag="anytls-in-${new_port}"
+                fi
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                if [[ $is_reality -eq 1 ]]; then
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                else
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                if [[ $is_reality -eq 1 ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，handshake.server 已同步更新"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
+                ;;
+            3)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "密码已重新生成: ${new_password}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        regenerate_links_from_config
+        print_info "重启服务..."
+        svc_restart
+        sleep 2
+        if svc_is_active; then
+            print_success "服务已重启"
+        else
+            print_error "服务重启失败"
+        fi
     fi
 }
 
@@ -2826,7 +4083,6 @@ delete_all_nodes() {
     local dns_strategy="prefer_ipv4"
     [[ "$OUTBOUND_IP_MODE" == "ipv6" ]] && dns_strategy="prefer_ipv6"
     [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]] && dns_strategy="ipv6_only"
-    [[ "$OUTBOUND_IP_MODE" == "ipv4" ]] && dns_strategy="ipv4_only"
     
     cat > ${CONFIG_FILE} << EOFCONFIG
 {
@@ -2883,7 +4139,7 @@ EOFCONFIG
         fi
     fi
 }
-# ==================== 配置生成 ====================
+# ==================== 配置生成（修复路由逻辑） ====================
 generate_config() {
     print_info "生成最终配置文件..."
 
@@ -2910,31 +4166,36 @@ generate_config() {
     done
     
     # 添加 direct outbound（根据出站模式设置绑定地址和域名解析策略）
+    # sing-box 1.14.0+ 移除了 domain_strategy，需通过 domain_resolver 设置解析策略
     local direct_outbound
     if [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
+        # IPv6优先：绑定IPv6地址 + domain_resolver策略prefer_ipv6，IPv6不可用时回退IPv4
         if [[ -n "${SERVER_IPV6}" ]]; then
             direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"fallback_delay\": \"300ms\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"prefer_ipv6\"}}"
         else
             direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "prefer_ipv6"}}'
         fi
     elif [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        # 仅IPv6：绑定IPv6地址 + domain_resolver策略ipv6_only，配合block规则彻底阻断IPv4
         if [[ -n "${SERVER_IPV6}" ]]; then
             direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"ipv6_only\"}}"
         else
             direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "ipv6_only"}}'
         fi
     elif [[ "$OUTBOUND_IP_MODE" == "ipv4" ]]; then
+        # 仅IPv4：绑定IPv4地址 + domain_resolver策略ipv4_only
         if [[ -n "${SERVER_IP}" ]]; then
             direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet4_bind_address\": \"${SERVER_IP}\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"ipv4_only\"}}"
         else
             direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "ipv4_only"}}'
         fi
     else
+        # dual 双栈：不限制绑定地址
         direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
     fi
     outbounds_array+=("$direct_outbound")
     
-    # ipv6_only 模式添加 block outbound 阻断 IPv4
+    # ipv6_only 模式下添加 block outbound 用于阻断 IPv4 出站
     if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
         local block_outbound='{"type": "block", "tag": "block-ipv4"}'
         outbounds_array+=("$block_outbound")
@@ -2955,11 +4216,29 @@ generate_config() {
     local route_rules=()
     local has_relay=0
     
-    # 构建入站分流规则映射：inbound_tag -> (分流规则数组)
-    declare -A inbound_has_routes
+    # ipv6_only 模式下，添加规则阻断所有 IPv4 出站流量
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        route_rules+=('{"ip_cidr":["0.0.0.0/0"],"outbound":"block-ipv4"}')
+        has_relay=1
+    fi
+    
+    # 1. 首先添加所有分流域名规则（无论节点默认是中转还是直连）
     for route in "${DOMAIN_ROUTES[@]}"; do
         IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
         [[ -z "$inbound_tag" || -z "$match_type" || -z "$match_value" || -z "$relay_tag" ]] && continue
+        
+        # 检查中转是否存在
+        local relay_exists=0
+        for rt in "${RELAY_TAGS[@]}"; do
+            if [[ "$rt" == "$relay_tag" ]]; then
+                relay_exists=1
+                break
+            fi
+        done
+        if [[ $relay_exists -eq 0 ]]; then
+            print_warning "分流规则引用的中转 ${relay_tag} 不存在，跳过规则: ${match_type}=${match_value}"
+            continue
+        fi
         
         # 根据匹配类型生成对应的 sing-box 规则
         local rule_part=""
@@ -2981,25 +4260,31 @@ generate_config() {
                 ;;
         esac
         
-        # 生成完整的路由规则（同时匹配入站和分流条件）
         route_rules+=("{\"inbound\":[\"${inbound_tag}\"],${rule_part},\"outbound\":\"${relay_tag}\"}")
-        inbound_has_routes["$inbound_tag"]=1
         has_relay=1
     done
     
-    # 为每个节点添加默认路由规则
+    # 2. 为每个节点添加默认路由（仅当节点配置了中转且不是 direct）
     for i in "${!INBOUND_TAGS[@]}"; do
         local inbound_tag="${INBOUND_TAGS[$i]}"
         local relay_tag="${INBOUND_RELAY_TAGS[$i]}"
         
+        # 如果节点配置了具体的中转（非 direct），则添加兜底规则
         if [[ "$relay_tag" != "direct" ]]; then
-            # 有分流规则的节点：分流规则匹配不到时走直连
-            if [[ -n "${inbound_has_routes["$inbound_tag"]}" ]]; then
-                route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"direct\"}")
-            else
-                # 没有分流规则的节点：全部走中转（原行为）
-                route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"${relay_tag}\"}")
+            # 检查中转是否存在
+            local relay_exists=0
+            for rt in "${RELAY_TAGS[@]}"; do
+                if [[ "$rt" == "$relay_tag" ]]; then
+                    relay_exists=1
+                    break
+                fi
+            done
+            if [[ $relay_exists -eq 0 ]]; then
+                print_warning "节点 ${inbound_tag} 配置的中转 ${relay_tag} 不存在，将改为直连"
+                INBOUND_RELAY_TAGS[$i]="direct"
+                continue
             fi
+            route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"${relay_tag}\"}")
             has_relay=1
         fi
     done
@@ -3017,47 +4302,9 @@ generate_config() {
         route_json="{\"final\":\"direct\",\"default_domain_resolver\":\"local\"}"
     fi
     
-    # ipv6_only 模式添加 IPv4 阻断路由规则
-    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
-        # 需要在 route_rules 中添加 IPv4 阻断规则
-        route_rules+=('{"ip_cidr":["0.0.0.0/0"],"outbound":"block-ipv4"}')
-        # 重新构建 route_json
-        if [[ $has_relay -eq 1 ]]; then
-            route_json="{\"rules\":["
-            for i in "${!route_rules[@]}"; do
-                [[ $i -gt 0 ]] && route_json+=","
-                route_json+="${route_rules[$i]}"
-            done
-            route_json+="],\"final\":\"direct\",\"default_domain_resolver\":\"local\"}"
-        else
-            route_json="{\"rules\":["
-            for i in "${!route_rules[@]}"; do
-                [[ $i -gt 0 ]] && route_json+=","
-                route_json+="${route_rules[$i]}"
-            done
-            route_json+="],\"final\":\"direct\",\"default_domain_resolver\":\"local\"}"
-        fi
-    fi
-    
     # 构建 DNS 配置（根据出站 IP 模式）
     local dns_json
-    if [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
-        dns_json='{
-    "servers": [
-      {
-        "tag": "local",
-        "type": "local"
-      },
-      {
-        "tag": "remote",
-        "type": "udp",
-        "server": "8.8.8.8"
-      }
-    ],
-    "final": "remote",
-    "strategy": "prefer_ipv6"
-  }'
-    elif [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
         dns_json='{
     "servers": [
       {
@@ -3073,7 +4320,7 @@ generate_config() {
     "final": "remote",
     "strategy": "ipv6_only"
   }'
-    elif [[ "$OUTBOUND_IP_MODE" == "ipv4" ]]; then
+    elif [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
         dns_json='{
     "servers": [
       {
@@ -3087,7 +4334,23 @@ generate_config() {
       }
     ],
     "final": "remote",
-    "strategy": "ipv4_only"
+    "strategy": "prefer_ipv6"
+  }'
+    elif [[ "$OUTBOUND_IP_MODE" == "dual" ]]; then
+        dns_json='{
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      },
+      {
+        "tag": "remote",
+        "type": "udp",
+        "server": "8.8.8.8"
+      }
+    ],
+    "final": "remote",
+    "strategy": "prefer_ipv4"
   }'
     else
         dns_json='{
@@ -3217,7 +4480,7 @@ show_menu() {
     echo ""
     echo -e "${GREEN}[5]${NC} HTTPS ${CYAN}→ 标准HTTPS，可过CDN${NC}"
     echo ""
-    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用TLS协议${NC}"
+    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用 TLS 协议，可启用 REALITY 伪装${NC}"
     echo ""
     read -p "选择 [1-6]: " choice
     
@@ -3405,6 +4668,37 @@ show_main_menu() {
         echo ""
 }
 
+# ==================== 修改节点菜单 ====================
+modify_node_menu() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}请选择要修改的节点类型:${NC}"
+    echo -e "  ${GREEN}[1]${NC} Reality 节点"
+    echo -e "  ${GREEN}[2]${NC} Hysteria2 节点"
+    echo -e "  ${GREEN}[3]${NC} SOCKS5 节点"
+    echo -e "  ${GREEN}[4]${NC} ShadowTLS 节点"
+    echo -e "  ${GREEN}[5]${NC} HTTPS 节点"
+    echo -e "  ${GREEN}[6]${NC} AnyTLS 节点"
+    echo -e "  ${GREEN}[0]${NC} 返回"
+    echo ""
+    read -p "请选择: " mod_type
+    
+    case $mod_type in
+        1) modify_reality_node ;;
+        2) modify_hysteria2_node ;;
+        3) modify_socks5_node ;;
+        4) modify_shadowtls_node ;;
+        5) modify_https_node ;;
+        6) modify_anytls_node ;;
+        0) return 0 ;;
+        *) print_error "无效选项" ;;
+    esac
+}
+
 # ==================== 配置查看菜单 ====================
 config_and_view_menu() {
     while true; do
@@ -3429,16 +4723,16 @@ config_and_view_menu() {
         echo ""
         echo -e "  ${GREEN}[8]${NC} 查看 AnyTLS 节点"
         echo ""
-        echo -e "  ${GREEN}[9]${NC} 删除单个节点"
-                echo ""
-                echo -e "  ${GREEN}[10]${NC} 删除全部节点"
-                echo ""
-                echo -e "  ${GREEN}[11]${NC} 修改节点配置"
-                echo ""
-                echo -e "  ${GREEN}[0]${NC} 返回主菜单"
-                echo ""
-                
-                read -p "请选择 [0-11]: " cv_choice
+        echo -e "  ${GREEN}[9]${NC} 修改节点配置"
+        echo ""
+        echo -e "  ${GREEN}[10]${NC} 删除单个节点"
+        echo ""
+        echo -e "  ${GREEN}[11]${NC} 删除全部节点"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 返回主菜单"
+        echo ""
+        
+        read -p "请选择 [0-11]: " cv_choice
         
         case $cv_choice in
             1)
@@ -3537,16 +4831,16 @@ config_and_view_menu() {
                 read -p "按回车返回..." _
                 ;;
             9)
+                modify_node_menu
+                ;;
+            10)
                 delete_single_node
                 read -p "按回车返回..." _
                 ;;
-            10)
+            11)
                 delete_all_nodes
                 read -p "按回车返回..." _
                 ;;
-            11)
-                modify_node_config
-                ;;
             0)
                 break
                 ;;
@@ -3555,1165 +4849,6 @@ config_and_view_menu() {
                 ;;
         esac
     done
-}
-
-# ==================== 修改节点配置主菜单 ====================
-modify_node_config() {
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║              ${GREEN}修改节点配置菜单${CYAN}                   ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
-            echo -e "${YELLOW}当前没有配置任何节点，请先添加节点${NC}"
-            echo ""
-            read -p "按回车返回..." _
-            return
-        fi
-        
-        echo -e "${YELLOW}选择要修改的节点:${NC}"
-        echo ""
-        
-        for i in "${!INBOUND_TAGS[@]}"; do
-            local idx=$((i+1))
-            echo -e "  ${GREEN}[${idx}]${NC} ${INBOUND_PROTOS[$i]}:${INBOUND_PORTS[$i]}"
-        done
-        echo ""
-        echo -e "  ${GREEN}[0]${NC} 返回上一级菜单"
-        echo ""
-        
-        read -p "请选择: " node_choice
-        
-        if [[ "$node_choice" == "0" ]]; then
-            break
-        elif [[ "$node_choice" =~ ^[0-9]+$ ]] && (( node_choice >= 1 && node_choice <= ${#INBOUND_TAGS[@]} )); then
-            local idx=$((node_choice-1))
-            local protocol="${INBOUND_PROTOS[$idx]}"
-            
-            case "$protocol" in
-                Reality)
-                    modify_reality_node "$idx"
-                    ;;
-                Hysteria2)
-                    modify_hysteria2_node "$idx"
-                    ;;
-                SOCKS5)
-                    modify_socks5_node "$idx"
-                    ;;
-                ShadowTLS)
-                    modify_shadowtls_node "$idx"
-                    ;;
-                HTTPS)
-                    modify_https_node "$idx"
-                    ;;
-                AnyTLS)
-                    modify_anytls_node "$idx"
-                    ;;
-                *)
-                    print_error "不支持的协议: ${protocol}"
-                    ;;
-            esac
-        else
-            print_error "无效选项"
-        fi
-    done
-}
-
-# ==================== 修改 Reality 节点配置 ====================
-modify_reality_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║              ${GREEN}修改 Reality 节点配置${CYAN}           ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        # 获取当前配置
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
-        local current_uuid=$(echo "$inbound" | jq -r '.users[0].uuid // empty' 2>/dev/null)
-        local current_short_id=$(echo "$inbound" | jq -r '.reality.short_id[0] // empty' 2>/dev/null)
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        echo -e "  SNI: ${current_sni:-未设置}"
-        echo -e "  UUID: ${current_uuid:-未设置}"
-        echo -e "  Short ID: ${current_short_id:-未设置}"
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI"
-        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
-        echo -e "  ${GREEN}[4]${NC} 重新生成 Short ID"
-        echo -e "  ${GREEN}[5]${NC} 重新生成 Reality 密钥对"
-        echo -e "  ${GREEN}[6]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    # 检查端口占用
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    # 更新端口
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    # 更新标签
-                    local new_tag="vless-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    # 更新路由规则
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改 SNI
-                local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
-                
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                    print_info "已随机生成 SNI: ${new_sni}"
-                fi
-                
-                if [[ "$new_sni" != "$current_sni" ]]; then
-                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .reality.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_SNIS[$idx]="$new_sni"
-                    print_success "SNI 已修改为 ${new_sni}"
-                    config_changed=1
-                else
-                    print_info "SNI 保持不变"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 重新生成 UUID
-                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-                jq --arg tag "$tag" --arg uuid "$new_uuid" '.inbounds |= map(if .tag == $tag then .users[0].uuid = $uuid else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "UUID 已重新生成"
-                echo -e "  新 UUID: ${CYAN}${new_uuid}${NC}"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 重新生成 Short ID
-                local new_short_id=$(openssl rand -hex 4)
-                jq --arg tag "$tag" --arg sid "$new_short_id" '.inbounds |= map(if .tag == $tag then .reality.short_id = [$sid] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "Short ID 已重新生成"
-                echo -e "  新 Short ID: ${CYAN}${new_short_id}${NC}"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            5)
-                # 重新生成 Reality 密钥对
-                local keys=$(openssl ecparam -name prime256v1 -genkey -noout -outform PEM 2>/dev/null)
-                local priv_key=$(echo "$keys" | openssl ec -outform DER 2>/dev/null | tail -c +8 | head -c 32 | xxd -p -c 32 | tr -d '\n')
-                local pub_key=$(echo "$keys" | openssl ec -pubout -outform DER 2>/dev/null | tail -c +26 | head -c 32 | xxd -p -c 32 | tr -d '\n')
-                
-                jq --arg tag "$tag" --arg priv "$priv_key" --arg pub "$pub_key" '.inbounds |= map(if .tag == $tag then .reality.private_key = $priv | .reality.public_key = $pub else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "Reality 密钥对已重新生成"
-                echo -e "  公钥: ${CYAN}${pub_key}${NC}"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            6)
-                # 全部重新配置
-                print_warning "这将重新配置该 Reality 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    # 删除原节点，然后重新添加
-                    delete_inbound_by_tag "$tag"
-                    
-                    # 重新添加 Reality 节点
-                    local old_idx=$idx
-                    setup_reality
-                    
-                    print_success "Reality 节点已重新配置"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 修改 Hysteria2 节点配置 ====================
-modify_hysteria2_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║            ${GREEN}修改 Hysteria2 节点配置${CYAN}         ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
-        local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
-        local has_obfs=$(echo "$inbound" | jq -e '.obfs != null' 2>/dev/null)
-        local current_obfs_password=""
-        
-        if [[ "$has_obfs" == "0" ]]; then
-            current_obfs_password=$(echo "$inbound" | jq -r '.obfs.password // empty' 2>/dev/null)
-        fi
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        echo -e "  SNI: ${current_sni:-未设置}"
-        echo -e "  密码: ${current_password:-未设置}"
-        if [[ "$has_obfs" == "0" ]]; then
-            echo -e "  混淆: 已启用 (密码: ${current_obfs_password})"
-        else
-            echo -e "  混淆: 未启用"
-        fi
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI"
-        echo -e "  ${GREEN}[3]${NC} 修改密码"
-        echo -e "  ${GREEN}[4]${NC} 修改/启用/禁用混淆"
-        echo -e "  ${GREEN}[5]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    local new_tag="hy2-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改 SNI
-                local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
-                
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                    print_info "已随机生成 SNI: ${new_sni}"
-                fi
-                
-                if [[ "$new_sni" != "$current_sni" ]]; then
-                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_SNIS[$idx]="$new_sni"
-                    print_success "SNI 已修改为 ${new_sni}"
-                    config_changed=1
-                else
-                    print_info "SNI 保持不变"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 修改密码
-                local new_password=""
-                read -p "请输入新的密码 (留空随机生成): " new_password
-                
-                if [[ -z "$new_password" ]]; then
-                    new_password=$(openssl rand -hex 16)
-                    print_info "已随机生成密码: ${new_password}"
-                fi
-                
-                jq --arg tag "$tag" --arg pass "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "密码已修改"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 修改混淆
-                echo ""
-                echo -e "  ${GREEN}[1]${NC} 启用混淆 (随机密码)"
-                echo -e "  ${GREEN}[2]${NC} 启用混淆 (自定义密码)"
-                echo -e "  ${GREEN}[3]${NC} 修改混淆密码"
-                echo -e "  ${GREEN}[4]${NC} 禁用混淆"
-                echo -e "  ${GREEN}[0]${NC} 取消"
-                echo ""
-                
-                read -p "请选择: " obfs_choice
-                
-                case $obfs_choice in
-                    0)
-                        ;;
-                    1)
-                        # 启用混淆，随机密码
-                        local obfs_pass=$(openssl rand -hex 16)
-                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs = {"type": "salamander", "password": $pass} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "混淆已启用，密码: ${obfs_pass}"
-                        config_changed=1
-                        read -p "按回车继续..." _
-                        ;;
-                    2)
-                        # 启用混淆，自定义密码
-                        local obfs_pass=""
-                        read -p "请输入混淆密码 (留空随机生成): " obfs_pass
-                        
-                        if [[ -z "$obfs_pass" ]]; then
-                            obfs_pass=$(openssl rand -hex 16)
-                            print_info "已随机生成混淆密码: ${obfs_pass}"
-                        fi
-                        
-                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs = {"type": "salamander", "password": $pass} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "混淆已启用"
-                        config_changed=1
-                        read -p "按回车继续..." _
-                        ;;
-                    3)
-                        # 修改混淆密码
-                        if [[ "$has_obfs" != "0" ]]; then
-                            print_warning "混淆当前未启用"
-                            read -p "按回车继续..." _
-                            continue
-                        fi
-                        
-                        local obfs_pass=""
-                        read -p "请输入新的混淆密码 (留空随机生成): " obfs_pass
-                        
-                        if [[ -z "$obfs_pass" ]]; then
-                            obfs_pass=$(openssl rand -hex 16)
-                            print_info "已随机生成密码: ${obfs_pass}"
-                        fi
-                        
-                        jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs.password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "混淆密码已修改"
-                        config_changed=1
-                        read -p "按回车继续..." _
-                        ;;
-                    4)
-                        # 禁用混淆
-                        if [[ "$has_obfs" != "0" ]]; then
-                            print_info "混淆当前未启用"
-                            read -p "按回车继续..." _
-                            continue
-                        fi
-                        
-                        jq --arg tag "$tag" '.inbounds |= map(if .tag == $tag then del(.obfs) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "混淆已禁用"
-                        config_changed=1
-                        read -p "按回车继续..." _
-                        ;;
-                    *)
-                        print_error "无效选项"
-                        ;;
-                esac
-                ;;
-            5)
-                # 全部重新配置
-                print_warning "这将重新配置该 Hysteria2 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    delete_inbound_by_tag "$tag"
-                    setup_hysteria2
-                    print_success "Hysteria2 节点已重新配置"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 修改 SOCKS5 节点配置 ====================
-modify_socks5_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║            ${GREEN}修改 SOCKS5 节点配置${CYAN}            ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local has_auth=$(echo "$inbound" | jq -e '.users != null' 2>/dev/null)
-        local auth_user=""
-        local auth_pass=""
-        
-        if [[ "$has_auth" == "0" ]]; then
-            auth_user=$(echo "$inbound" | jq -r '.users[0].username // empty' 2>/dev/null)
-            auth_pass=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
-        fi
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        if [[ "$has_auth" == "0" ]]; then
-            echo -e "  认证: 已启用 (${auth_user}:${auth_pass})"
-        else
-            echo -e "  认证: 未启用"
-        fi
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改认证信息"
-        echo -e "  ${GREEN}[3]${NC} 启用/禁用认证"
-        echo -e "  ${GREEN}[4]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    local new_tag="socks-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改认证信息
-                if [[ "$has_auth" != "0" ]]; then
-                    print_warning "当前未启用认证，请先启用认证"
-                    read -p "按回车继续..." _
-                    continue
-                fi
-                
-                local new_user=""
-                local new_pass=""
-                
-                read -p "请输入新的用户名 (留空随机生成): " new_user
-                
-                if [[ -z "$new_user" ]]; then
-                    new_user="user_$(openssl rand -hex 4)"
-                    print_info "已随机生成用户名: ${new_user}"
-                fi
-                
-                read -p "请输入新的密码 (留空随机生成): " new_pass
-                
-                if [[ -z "$new_pass" ]]; then
-                    new_pass=$(openssl rand -hex 16)
-                    print_info "已随机生成密码: ${new_pass}"
-                fi
-                
-                if [[ "$new_user" != "$auth_user" ]] || [[ "$new_pass" != "$auth_pass" ]]; then
-                    jq --arg tag "$tag" --arg user "$new_user" --arg pass "$new_pass" '.inbounds |= map(if .tag == $tag then .users[0].username = $user | .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    print_success "认证信息已修改"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 启用/禁用认证
-                if [[ "$has_auth" == "0" ]]; then
-                    print_info "当前已启用认证，是否禁用? (y/N): " confirm_disable
-                    read confirm_disable
-                    
-                    if [[ "$confirm_disable" =~ ^[Yy]$ ]]; then
-                        jq --arg tag "$tag" '.inbounds |= map(if .tag == $tag then del(.users) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "认证已禁用"
-                        config_changed=1
-                    fi
-                else
-                    print_info "当前未启用认证，是否启用? (y/N): " confirm_enable
-                    read confirm_enable
-                    
-                    if [[ "$confirm_enable" =~ ^[Yy]$ ]]; then
-                        local user="user"
-                        local pass=$(openssl rand -hex 16)
-                        jq --arg tag "$tag" --arg user "$user" --arg pass "$pass" '.inbounds |= map(if .tag == $tag then .users = [{"username": $user, "password": $pass}] else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                        print_success "认证已启用: ${user}/${pass}"
-                        config_changed=1
-                    fi
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 全部重新配置
-                print_warning "这将重新配置该 SOCKS5 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    delete_inbound_by_tag "$tag"
-                    setup_socks
-                    print_success "SOCKS5 节点已重新配置"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 修改 ShadowTLS 节点配置 ====================
-modify_shadowtls_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║           ${GREEN}修改 ShadowTLS 节点配置${CYAN}         ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
-        local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
-        # 获取对应 Shadowsocks 入站的密码
-        local ss_tag="shadowsocks-in-${port}"
-        local ss_inbound=$(jq --arg tag "$ss_tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_ss_password=$(echo "$ss_inbound" | jq -r '.password // empty' 2>/dev/null)
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        echo -e "  SNI: ${current_sni:-未设置}"
-        echo -e "  ShadowTLS 密码: ${current_password:-未设置}"
-        echo -e "  Shadowsocks 密码: ${current_ss_password:-未设置}"
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI"
-        echo -e "  ${GREEN}[3]${NC} 修改 ShadowTLS 密码"
-        echo -e "  ${GREEN}[4]${NC} 修改 Shadowsocks 密码"
-        echo -e "  ${GREEN}[5]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    # 更新 ShadowTLS 入站端口和标签
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    local new_tag="tls-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    # 更新 Shadowsocks 入站标签和 detour 引用
-                    local old_ss_tag="shadowsocks-in-${port}"
-                    local new_ss_tag="shadowsocks-in-${new_port}"
-                    jq --arg old_ss "$old_ss_tag" --arg new_ss "$new_ss_tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_ss then .tag = $new_ss elif .tag == $new_tag then .detour = $new_ss else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改 SNI
-                local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
-                
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                    print_info "已随机生成 SNI: ${new_sni}"
-                fi
-                
-                if [[ "$new_sni" != "$current_sni" ]]; then
-                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .handshake.server = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_SNIS[$idx]="$new_sni"
-                    print_success "SNI 已修改为 ${new_sni}"
-                    config_changed=1
-                else
-                    print_info "SNI 保持不变"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 修改 ShadowTLS 密码
-                local new_password=""
-                read -p "请输入新的 ShadowTLS 密码 (留空随机生成): " new_password
-                
-                if [[ -z "$new_password" ]]; then
-                    new_password=$(openssl rand -hex 16)
-                    print_info "已随机生成密码: ${new_password}"
-                fi
-                
-                jq --arg tag "$tag" --arg pass "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "ShadowTLS 密码已修改"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 修改 Shadowsocks 密码
-                local ss_tag_current="shadowsocks-in-${port}"
-                local new_ss_password=""
-                read -p "请输入新的 Shadowsocks 密码 (留空随机生成): " new_ss_password
-                
-                if [[ -z "$new_ss_password" ]]; then
-                    new_ss_password=$(openssl rand -base64 32)
-                    print_info "已随机生成密码: ${new_ss_password}"
-                fi
-                
-                jq --arg tag "$ss_tag_current" --arg pass "$new_ss_password" '.inbounds |= map(if .tag == $tag then .password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "Shadowsocks 密码已修改"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            5)
-                # 全部重新配置
-                print_warning "这将重新配置该 ShadowTLS 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    # 同时删除 Shadowsocks 入站
-                    local ss_tag_current="shadowsocks-in-${port}"
-                    delete_inbound_by_tag "$tag"
-                    delete_inbound_by_tag "$ss_tag_current"
-                    setup_shadowtls
-                    print_success "ShadowTLS 节点已重新配置"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 修改 HTTPS 节点配置 ====================
-modify_https_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║            ${GREEN}修改 HTTPS 节点配置${CYAN}            ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
-        local current_uuid=$(echo "$inbound" | jq -r '.users[0].uuid // empty' 2>/dev/null)
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        echo -e "  SNI: ${current_sni:-未设置}"
-        echo -e "  UUID: ${current_uuid:-未设置}"
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI"
-        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
-        echo -e "  ${GREEN}[4]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    local new_tag="http-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改 SNI
-                local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
-                
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                    print_info "已随机生成 SNI: ${new_sni}"
-                fi
-                
-                if [[ "$new_sni" != "$current_sni" ]]; then
-                    # 修改 SNI 时需要重新生成自签证书
-                    gen_cert_for_sni "${new_sni}"
-                    jq --arg tag "$tag" --arg sni "$new_sni" --arg cert_path "${CERT_DIR}/${new_sni}/cert.pem" --arg key_path "${CERT_DIR}/${new_sni}/private.key" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .tls.certificate_path = $cert_path | .tls.key_path = $key_path else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_SNIS[$idx]="$new_sni"
-                    print_success "SNI 已修改为 ${new_sni}"
-                    config_changed=1
-                else
-                    print_info "SNI 保持不变"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 重新生成 UUID
-                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-                jq --arg tag "$tag" --arg uuid "$new_uuid" '.inbounds |= map(if .tag == $tag then .users[0].uuid = $uuid else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "UUID 已重新生成"
-                echo -e "  新 UUID: ${CYAN}${new_uuid}${NC}"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 全部重新配置
-                print_warning "这将重新配置该 HTTPS 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    delete_inbound_by_tag "$tag"
-                    setup_https
-                    print_success "HTTPS 节点已重新配置"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 修改 AnyTLS 节点配置 ====================
-modify_anytls_node() {
-    local idx=$1
-    local port="${INBOUND_PORTS[$idx]}"
-    local tag="${INBOUND_TAGS[$idx]}"
-    local config_changed=0
-    
-    while true; do
-        clear
-        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
-        echo -e "${CYAN}║           ${GREEN}修改 AnyTLS 节点配置${CYAN}            ║${NC}"
-        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
-        echo ""
-        
-        local inbound=$(jq --arg tag "$tag" -c '.inbounds[] | select(.tag == $tag)' "${CONFIG_FILE}" 2>/dev/null)
-        local current_sni=$(echo "$inbound" | jq -r '.tls.server_name // empty' 2>/dev/null)
-        local current_password=$(echo "$inbound" | jq -r '.users[0].password // empty' 2>/dev/null)
-        
-        echo -e "${YELLOW}当前配置:${NC}"
-        echo -e "  端口: ${port}"
-        echo -e "  SNI: ${current_sni:-未设置}"
-        echo -e "  密码: ${current_password:-未设置}"
-        echo ""
-        
-        echo -e "  ${GREEN}[1]${NC} 修改端口"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI"
-        echo -e "  ${GREEN}[3]${NC} 修改密码"
-        echo -e "  ${GREEN}[4]${NC} 全部重新配置"
-        echo -e "  ${GREEN}[0]${NC} 返回"
-        echo ""
-        
-        read -p "请选择: " choice
-        
-        case $choice in
-            0)
-                break
-                ;;
-            1)
-                # 修改端口
-                local new_port=""
-                read -p "请输入新的端口 (留空随机生成): " new_port
-                
-                if [[ -z "$new_port" ]]; then
-                    new_port=$(get_random_free_port)
-                    if [[ -z "$new_port" ]]; then
-                        print_error "无法分配随机端口"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    print_info "已随机分配端口: ${new_port}"
-                fi
-                
-                if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port_in_use "$new_port"; then
-                        print_error "端口 ${new_port} 已被占用或无效"
-                        read -p "按回车继续..." _
-                        continue
-                    fi
-                    
-                    jq --arg tag "$tag" --argjson port "$new_port" '.inbounds |= map(if .tag == $tag then .listen_port = $port else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_PORTS[$idx]="$new_port"
-                    
-                    local new_tag="anytls-in-${new_port}"
-                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" '.inbounds |= map(if .tag == $old_tag then .tag = $new_tag else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_TAGS[$idx]="$new_tag"
-                    
-                    tag="$new_tag"
-                    port="$new_port"
-                    
-                    update_inbound_route_tag "$tag" "$new_tag"
-                    
-                    print_success "端口已修改为 ${new_port}"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            2)
-                # 修改 SNI
-                local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
-                
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                    print_info "已随机生成 SNI: ${new_sni}"
-                fi
-                
-                if [[ "$new_sni" != "$current_sni" ]]; then
-                    jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                    INBOUND_SNIS[$idx]="$new_sni"
-                    print_success "SNI 已修改为 ${new_sni}"
-                    config_changed=1
-                else
-                    print_info "SNI 保持不变"
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            3)
-                # 修改密码
-                local new_password=""
-                read -p "请输入新的密码 (留空随机生成): " new_password
-                
-                if [[ -z "$new_password" ]]; then
-                    new_password=$(openssl rand -hex 16)
-                    print_info "已随机生成密码: ${new_password}"
-                fi
-                
-                jq --arg tag "$tag" --arg pwd "$new_password" '.inbounds |= map(if .tag == $tag then .users[0].password = $pwd else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-                print_success "密码已修改"
-                config_changed=1
-                
-                read -p "按回车继续..." _
-                ;;
-            4)
-                # 全部重新配置
-                print_warning "这将重新配置该 AnyTLS 节点的所有参数"
-                read -p "确认继续? (y/N): " confirm
-                
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    delete_inbound_by_tag "$tag"
-                    setup_anytls
-                    print_success "AnyTLS 节点已重新配置"
-                    config_changed=1
-                fi
-                
-                read -p "按回车继续..." _
-                ;;
-            *)
-                print_error "无效选项"
-                ;;
-        esac
-        # 配置变更后重新生成链接并重启服务
-        if [[ $config_changed -eq 1 ]]; then
-            regenerate_links_from_config
-            start_svc
-            config_changed=0
-        fi
-    done
-}
-
-# ==================== 更新路由规则中的入站标签 ====================
-update_inbound_route_tag() {
-    local old_tag=$1
-    local new_tag=$2
-    
-    if [[ -z "$old_tag" ]] || [[ -z "$new_tag" ]]; then
-        return
-    fi
-    
-    # 更新路由规则中的入站标签
-    jq --arg old "$old_tag" --arg new "$new_tag" \
-        '.route.rules |= map(if .inbound then .inbound |= map(if . == $old then $new else . end) else . end)' \
-        "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-    
-    # 更新分流规则中的入站标签
-    for i in "${!DOMAIN_ROUTES[@]}"; do
-        local route="${DOMAIN_ROUTES[$i]}"
-        IFS='|' read -r tag match_type match_value relay_tag desc <<< "$route"
-        
-        if [[ "$tag" == "$old_tag" ]]; then
-            DOMAIN_ROUTES[$i]="${new_tag}|${match_type}|${match_value}|${relay_tag}|${desc}"
-        fi
-    done
-    
-    save_domain_routes_to_file
-}
-
-# ==================== 删除指定标签的入站 ====================
-delete_inbound_by_tag() {
-    local tag_to_delete=$1
-    
-    if [[ -z "$tag_to_delete" ]]; then
-        return
-    fi
-    
-    # 从配置文件中删除入站
-    jq --arg tag "$tag_to_delete" '.inbounds |= map(select(.tag != $tag))' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-    
-    # 更新路由规则
-    jq --arg tag "$tag_to_delete" '.route.rules |= map(if .inbound then .inbound |= map(select(. != $tag)) else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
-    
-    # 从内存数组中删除
-    for i in "${!INBOUND_TAGS[@]}"; do
-        if [[ "${INBOUND_TAGS[$i]}" == "$tag_to_delete" ]]; then
-            unset "INBOUND_TAGS[$i]"
-            unset "INBOUND_PORTS[$i]"
-            unset "INBOUND_PROTOS[$i]"
-            unset "INBOUND_SNIS[$i]"
-            unset "INBOUND_RELAY_TAGS[$i]"
-        fi
-    done
-    
-    # 重新索引数组
-    INBOUND_TAGS=("${INBOUND_TAGS[@]}")
-    INBOUND_PORTS=("${INBOUND_PORTS[@]}")
-    INBOUND_PROTOS=("${INBOUND_PROTOS[@]}")
-    INBOUND_SNIS=("${INBOUND_SNIS[@]}")
-    INBOUND_RELAY_TAGS=("${INBOUND_RELAY_TAGS[@]}")
-    
-    # 删除相关的分流规则
-    local new_routes=()
-    for route in "${DOMAIN_ROUTES[@]}"; do
-        IFS='|' read -r tag match_type match_value relay_tag desc <<< "$route"
-        if [[ "$tag" != "$tag_to_delete" ]]; then
-            new_routes+=("$route")
-        fi
-    done
-    DOMAIN_ROUTES=("${new_routes[@]}")
-    save_domain_routes_to_file
 }
 
 # ==================== 完整卸载 ====================
@@ -5314,9 +5449,18 @@ main_menu() {
 setup_sb_shortcut() {
     print_info "创建快捷命令 sb..."
     
+    local sb_target="/etc/sing-box/install.sh"
+    
+    # 确保脚本在标准位置
     if [[ ! -f "${SCRIPT_PATH}" ]]; then
-        print_warning "当前脚本并非磁盘文件，跳过创建 sb"
+        print_warning "脚本不在磁盘上，跳过创建 sb"
         return
+    fi
+    
+    # 如果脚本不在标准位置，复制一份
+    if [[ "${SCRIPT_PATH}" != "${sb_target}" ]]; then
+        cp "${SCRIPT_PATH}" "${sb_target}" 2>/dev/null && chmod +x "${sb_target}"
+        SCRIPT_PATH="${sb_target}"
     fi
     
     cat > /usr/local/bin/sb << EOSB
@@ -5334,17 +5478,25 @@ main() {
         exit 1
     fi
     
-    # 如果脚本通过 curl|bash 运行（$0 为 /dev/stdin），先下载到磁盘再重新执行
-    if [[ "$0" == "/dev/stdin" || "$0" == "bash" ]] || [[ ! -f "${SCRIPT_PATH}" ]]; then
-        local _script_url="https://raw.githubusercontent.com/Kiss8202/argo/main/install.sh"
-        local _script_dest="/root/install.sh"
-        print_info "检测到管道安装方式，正在下载脚本到磁盘..."
-        if curl -sL -o "${_script_dest}" "${_script_url}"; then
-            chmod +x "${_script_dest}"
-            print_success "脚本已保存到 ${_script_dest}，重新执行中..."
-            exec bash "${_script_dest}" "$@"
-        else
-            print_warning "无法从GitHub下载脚本，继续运行但快捷命令 sb 可能无法创建"
+    # 如果脚本不在磁盘上（如 curl|bash 方式运行），先保存到磁盘再重新执行
+    local sb_script="/etc/sing-box/install.sh"
+    if [[ ! -f "${SCRIPT_PATH}" ]]; then
+        mkdir -p /etc/sing-box
+        # 尝试从 BASH_SOURCE 获取
+        local script_src="${BASH_SOURCE[0]:-$0}"
+        if [[ -f "${script_src}" ]]; then
+            cp "${script_src}" "${sb_script}" 2>/dev/null
+        fi
+        # 如果 BASH_SOURCE 也不可用，从 GitHub 重新下载
+        if [[ ! -f "${sb_script}" ]]; then
+            print_info "脚本不在磁盘上，从 GitHub 下载到 ${sb_script} ..."
+            local repo_raw="https://raw.githubusercontent.com/Kiss8202/argo/main/install.sh"
+            wget -q -O "${sb_script}" "${repo_raw}" 2>/dev/null || curl -sL -o "${sb_script}" "${repo_raw}" 2>/dev/null || true
+        fi
+        if [[ -f "${sb_script}" ]]; then
+            chmod +x "${sb_script}"
+            print_success "脚本已保存到 ${sb_script}，重新执行..."
+            exec bash "${sb_script}" "$@"
         fi
     fi
     
