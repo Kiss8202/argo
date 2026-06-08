@@ -3246,28 +3246,29 @@ generate_config() {
         outbounds_array+=("$relay_json")
     done
     
-    # 添加 direct outbound（根据出站模式设置绑定地址）
+    # 添加 direct outbound（根据出站模式设置绑定地址和域名解析策略）
+    # sing-box 1.14.0+ 移除了 domain_strategy，需通过 domain_resolver 设置解析策略
     local direct_outbound
     if [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
-        # IPv6优先：绑定IPv6地址出站，IPv6不可用时回退IPv4
+        # IPv6优先：绑定IPv6地址 + domain_resolver策略prefer_ipv6，IPv6不可用时回退IPv4
         if [[ -n "${SERVER_IPV6}" ]]; then
-            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"fallback_delay\": \"300ms\"}"
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"fallback_delay\": \"300ms\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"prefer_ipv6\"}}"
         else
-            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "prefer_ipv6"}}'
         fi
     elif [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
-        # 仅IPv6：只绑定IPv6地址，配合block规则彻底阻断IPv4
+        # 仅IPv6：绑定IPv6地址 + domain_resolver策略ipv6_only，配合block规则彻底阻断IPv4
         if [[ -n "${SERVER_IPV6}" ]]; then
-            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\"}"
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"ipv6_only\"}}"
         else
-            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "ipv6_only"}}'
         fi
     elif [[ "$OUTBOUND_IP_MODE" == "ipv4" ]]; then
-        # 仅IPv4：只绑定IPv4地址
+        # 仅IPv4：绑定IPv4地址 + domain_resolver策略ipv4_only
         if [[ -n "${SERVER_IP}" ]]; then
-            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet4_bind_address\": \"${SERVER_IP}\"}"
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet4_bind_address\": \"${SERVER_IP}\", \"domain_resolver\": {\"server\": \"remote\", \"strategy\": \"ipv4_only\"}}"
         else
-            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false, "domain_resolver": {"server": "remote", "strategy": "ipv4_only"}}'
         fi
     else
         # dual 双栈：不限制绑定地址
