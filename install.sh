@@ -382,7 +382,6 @@ ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=infinity
-Environment=ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true
 
 [Install]
 WantedBy=multi-user.target
@@ -498,6 +497,7 @@ save_links_to_files() {
     echo -en "${HTTPS_LINKS}" > "${HTTPS_LINKS_FILE}"
     echo -en "${ANYTLS_LINKS}" > "${ANYTLS_LINKS_FILE}"
     
+    chmod 600 "${LINK_DIR}"/*.txt 2>/dev/null || true
     chmod 700 "${LINK_DIR}" 2>/dev/null || true
     print_success "链接已保存到 ${LINK_DIR}"
 }
@@ -650,9 +650,25 @@ regenerate_links_from_config() {
     HTTPS_LINKS=""
     ANYTLS_LINKS=""
     
-    # 加载密钥文件
+    # 加载密钥文件（安全读取，避免代码注入）
     if [[ -f "${KEY_FILE}" ]]; then
-        source "${KEY_FILE}"
+        while IFS='=' read -r key value; do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            value="${value#\"}"
+            value="${value%\"}"
+            case "$key" in
+                UUID) UUID="$value" ;;
+                REALITY_PRIVATE) REALITY_PRIVATE="$value" ;;
+                REALITY_PUBLIC) REALITY_PUBLIC="$value" ;;
+                SHORT_ID) SHORT_ID="$value" ;;
+                HY2_PASSWORD) HY2_PASSWORD="$value" ;;
+                SS_PASSWORD) SS_PASSWORD="$value" ;;
+                SHADOWTLS_PASSWORD) SHADOWTLS_PASSWORD="$value" ;;
+                ANYTLS_PASSWORD) ANYTLS_PASSWORD="$value" ;;
+                SOCKS_USER) SOCKS_USER="$value" ;;
+                SOCKS_PASS) SOCKS_PASS="$value" ;;
+            esac
+        done < "${KEY_FILE}"
     fi
     
     # 确保 SERVER_IP 已设置
@@ -1026,6 +1042,8 @@ EOF
 load_ip_config() {
     if [[ -f "${IP_CONFIG_FILE}" ]] && [[ -r "${IP_CONFIG_FILE}" ]]; then
         while IFS='=' read -r key value; do
+            # 跳过注释和空行
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
             # 去除值两端的引号
             value="${value#\"}"
             value="${value%\"}"
@@ -1191,11 +1209,11 @@ get_ip() {
             print_success "使用 IPv4: ${SERVER_IP}"
         fi
     elif [[ -n "$ipv6" ]]; then
-        SERVER_IP="$ipv6"
-        SERVER_IPV6=""
-        [[ -z "$INBOUND_IP_MODE" ]] && INBOUND_IP_MODE="ipv6"
-        [[ -z "$OUTBOUND_IP_MODE" ]] && OUTBOUND_IP_MODE="dual"
-        print_success "使用 IPv6: ${SERVER_IP}"
+        SERVER_IP=""
+        SERVER_IPV6="$ipv6"
+        INBOUND_IP_MODE="ipv6"
+        [[ -z "$OUTBOUND_IP_MODE" || "$OUTBOUND_IP_MODE" == "dual" ]] && OUTBOUND_IP_MODE="dual"
+        print_success "仅 IPv6 网络: ${SERVER_IPV6}"
         print_info "已自动设置入站为 IPv6，出站为双栈模式"
     fi
     
@@ -2880,18 +2898,18 @@ setup_relay() {
                 echo ""
                 read -p "请输入新的描述信息 (留空则自动生成): " new_custom_desc
                 
-                # 临时保存当前数组状态，解析新链接
+                # 临时保存当前数组状态（解析失败时恢复）
                 local saved_tags=("${RELAY_TAGS[@]}")
                 local saved_jsons=("${RELAY_JSONS[@]}")
                 local saved_descs=("${RELAY_DESCS[@]}")
                 
-                # 先删除旧中转，解析新链接时tag会自动生成
-                unset RELAY_TAGS[$e]
-                unset RELAY_JSONS[$e]
-                unset RELAY_DESCS[$e]
-                RELAY_TAGS=("${RELAY_TAGS[@]}")
-                RELAY_JSONS=("${RELAY_JSONS[@]}")
-                RELAY_DESCS=("${RELAY_DESCS[@]}")
+                # 临时清空数组，解析新链接以获取JSON结构
+                local tmp_tags=("${RELAY_TAGS[@]}")
+                local tmp_jsons=("${RELAY_JSONS[@]}")
+                local tmp_descs=("${RELAY_DESCS[@]}")
+                RELAY_TAGS=()
+                RELAY_JSONS=()
+                RELAY_DESCS=()
                 
                 # 解析新链接
                 local parse_ok=0
@@ -2916,25 +2934,19 @@ setup_relay() {
                 fi
                 
                 if [[ $parse_ok -eq 1 ]]; then
-                    # 新解析的中转在数组末尾，将其替换到原位置并恢复原tag
-                    local new_idx=$(( ${#RELAY_TAGS[@]} - 1 ))
-                    local new_json="${RELAY_JSONS[$new_idx]}"
-                    local new_desc="${RELAY_DESCS[$new_idx]}"
+                    # 从解析结果中提取新JSON和新描述
+                    local new_json="${RELAY_JSONS[0]}"
+                    local new_desc="${RELAY_DESCS[0]}"
                     
                     # 将新JSON中的tag替换为原tag
-                    local new_tag="${RELAY_TAGS[$new_idx]}"
+                    local new_tag="${RELAY_TAGS[0]}"
                     new_json=$(echo "$new_json" | sed "s/\"${new_tag}\"/\"${old_tag}\"/g")
                     
-                    # 删除末尾新增的条目
-                    unset RELAY_TAGS[$new_idx]
-                    unset RELAY_JSONS[$new_idx]
-                    unset RELAY_DESCS[$new_idx]
-                    RELAY_TAGS=("${RELAY_TAGS[@]}")
-                    RELAY_JSONS=("${RELAY_JSONS[@]}")
-                    RELAY_DESCS=("${RELAY_DESCS[@]}")
+                    # 恢复原数组，替换指定位置
+                    RELAY_TAGS=("${tmp_tags[@]}")
+                    RELAY_JSONS=("${tmp_jsons[@]}")
+                    RELAY_DESCS=("${tmp_descs[@]}")
                     
-                    # 在原位置插入修改后的中转
-                    RELAY_TAGS[$e]="$old_tag"
                     RELAY_JSONS[$e]="$new_json"
                     RELAY_DESCS[$e]="$new_desc"
                     
