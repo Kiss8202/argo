@@ -75,7 +75,8 @@ SOCKS_USER=""
 SOCKS_PASS=""
 
 # 默认SNI
-DEFAULT_SNI="time.is"
+DEFAULT_SNI="www.oracle.com"
+DEFAULT_SNI1="www.oracle.com,www.mozilla.org"
 
 # Alpine 标记
 ALPINE=0
@@ -1214,7 +1215,7 @@ get_random_free_port() {
 }
 
 # 常用 SNI 域名列表
-SNI_LIST=("time.is" "itunes.apple.com" "www.bing.com" "www.microsoft.com" "www.amazon.com" "play.google.com" "www.cloudflare.com" "gateway.icloud.com" "www.yahoo.com" "dl.google.com")
+SNI_LIST=("www.oracle.com" "www.mozilla.org" "www.bing.com" "www.microsoft.com" "www.amazon.com" "play.google.com" "www.cloudflare.com" "gateway.icloud.com" "www.yahoo.com" "dl.google.com")
 
 # 随机选择 SNI
 get_random_sni() {
