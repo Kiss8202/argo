@@ -42,7 +42,7 @@ ANYTLS_LINKS=""
 # IP 配置
 SERVER_IPV6=""
 INBOUND_IP_MODE="dual"   # ipv4, ipv6 或 dual，控制入站监听地址（默认双栈）
-OUTBOUND_IP_MODE="dual"  # ipv4, ipv6 或 dual，控制出站连接（默认双栈）
+OUTBOUND_IP_MODE="dual"  # ipv4, ipv6, ipv6_only 或 dual，控制出站连接（默认双栈）
 IP_CONFIG_FILE="/etc/sing-box/ip_config.conf"
 
 # 中转配置数组
@@ -828,7 +828,7 @@ regenerate_links_from_config() {
                         cat > "${client_config_file_ipv4}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -890,7 +890,7 @@ EOFCLIENT
                             cat > "${client_config_file_ipv6}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -1572,7 +1572,8 @@ setup_shadowtls() {
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -1660,7 +1661,8 @@ EOFCLIENT
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -2866,13 +2868,14 @@ ip_config_menu() {
         echo -e "  ${GREEN}[2]${NC} 设置入站为 IPv6"
         echo -e "  ${GREEN}[3]${NC} 设置入站为双栈 (IPv4+IPv6)"
         echo -e "  ${GREEN}[4]${NC} 设置出站为 IPv4"
-        echo -e "  ${GREEN}[5]${NC} 设置出站为 IPv6"
-        echo -e "  ${GREEN}[6]${NC} 设置出站为双栈 (IPv4+IPv6)"
-        echo -e "  ${GREEN}[7]${NC} 手动修改 IPv4 地址"
-        echo -e "  ${GREEN}[8]${NC} 手动修改 IPv6 地址"
+        echo -e "  ${GREEN}[5]${NC} 设置出站为 IPv6 (优先)"
+        echo -e "  ${GREEN}[6]${NC} 设置出站为仅 IPv6 (IPv4不出站)"
+        echo -e "  ${GREEN}[7]${NC} 设置出站为双栈 (IPv4+IPv6)"
+        echo -e "  ${GREEN}[8]${NC} 手动修改 IPv4 地址"
+        echo -e "  ${GREEN}[9]${NC} 手动修改 IPv6 地址"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-8]: " ip_choice
+        read -p "请选择 [0-9]: " ip_choice
         
         case $ip_choice in
             1)
@@ -2929,7 +2932,8 @@ ip_config_menu() {
                 fi
                 OUTBOUND_IP_MODE="ipv6"
                 save_ip_config
-                print_success "出站已设置为 IPv6"
+                print_success "出站已设置为 IPv6 优先"
+                echo -e "${YELLOW}提示: IPv6 优先出站，IPv6 不可用时回退到 IPv4${NC}"
                 echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
                 read -p "是否立即重新生成配置? (y/N): " regen
                 if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
@@ -2937,6 +2941,22 @@ ip_config_menu() {
                 fi
                 ;;
             6)
+                if [[ -z "$SERVER_IPV6" ]]; then
+                    print_error "未检测到 IPv6 地址，请先手动设置"
+                    read -p "按回车继续..." _
+                    continue
+                fi
+                OUTBOUND_IP_MODE="ipv6_only"
+                save_ip_config
+                print_success "出站已设置为仅 IPv6"
+                echo -e "${YELLOW}提示: 仅使用 IPv6 出站，IPv4 将无法出站${NC}"
+                echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
+                read -p "是否立即重新生成配置? (y/N): " regen
+                if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
+                    generate_config && start_svc
+                fi
+                ;;
+            7)
                 OUTBOUND_IP_MODE="dual"
                 save_ip_config
                 print_success "出站已设置为双栈 (IPv4+IPv6)"
@@ -2947,7 +2967,7 @@ ip_config_menu() {
                     generate_config && start_svc
                 fi
                 ;;
-            7)
+            8)
                 read -p "请输入 IPv4 地址: " new_ipv4
                 if [[ -n "$new_ipv4" ]]; then
                     SERVER_IP="$new_ipv4"
@@ -2956,7 +2976,7 @@ ip_config_menu() {
                     echo -e "${YELLOW}提示: 需要重新生成链接文件${NC}"
                 fi
                 ;;
-            8)
+            9)
                 read -p "请输入 IPv6 地址: " new_ipv6
                 if [[ -n "$new_ipv6" ]]; then
                     SERVER_IPV6="$new_ipv6"
@@ -3143,6 +3163,7 @@ delete_all_nodes() {
     # 根据出站模式设置 DNS 策略
     local dns_strategy="prefer_ipv4"
     [[ "$OUTBOUND_IP_MODE" == "ipv6" ]] && dns_strategy="prefer_ipv6"
+    [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]] && dns_strategy="ipv6_only"
     
     cat > ${CONFIG_FILE} << EOFCONFIG
 {
@@ -3154,11 +3175,12 @@ delete_all_nodes() {
     "servers": [
       {
         "tag": "local",
-        "address": "local"
+        "type": "local"
       },
       {
         "tag": "remote",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ],
     "final": "remote",
@@ -3325,7 +3347,23 @@ generate_config() {
     
     # 构建 DNS 配置（根据出站 IP 模式）
     local dns_json
-    if [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        dns_json='{
+    "servers": [
+      {
+        "tag": "local",
+        "type": "local"
+      },
+      {
+        "tag": "remote",
+        "type": "udp",
+        "server": "8.8.8.8"
+      }
+    ],
+    "final": "remote",
+    "strategy": "ipv6_only"
+  }'
+    elif [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
         dns_json='{
     "servers": [
       {
@@ -3354,7 +3392,8 @@ generate_config() {
         "server": "8.8.8.8"
       }
     ],
-    "final": "remote"
+    "final": "remote",
+    "strategy": "prefer_ipv4"
   }'
     else
         dns_json='{
