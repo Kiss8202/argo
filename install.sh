@@ -3250,6 +3250,12 @@ generate_config() {
     local direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
     outbounds_array+=("$direct_outbound")
     
+    # ipv6_only 模式下添加 block outbound 用于阻断 IPv4 出站
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        local block_outbound='{"type": "block", "tag": "block-ipv4"}'
+        outbounds_array+=("$block_outbound")
+    fi
+    
     # 组合 outbounds
     local outbounds="["
     for i in "${!outbounds_array[@]}"; do
@@ -3264,6 +3270,12 @@ generate_config() {
     # 构建路由规则
     local route_rules=()
     local has_relay=0
+    
+    # ipv6_only 模式下，添加规则阻断所有 IPv4 出站流量
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        route_rules+=('{"ip_cidr":["0.0.0.0/0"],"outbound":"block-ipv4"}')
+        has_relay=1
+    fi
     
     # 1. 首先添加所有分流域名规则（无论节点默认是中转还是直连）
     for route in "${DOMAIN_ROUTES[@]}"; do
