@@ -5334,6 +5334,20 @@ main() {
         exit 1
     fi
     
+    # 如果脚本通过 curl|bash 运行（$0 为 /dev/stdin），先下载到磁盘再重新执行
+    if [[ "$0" == "/dev/stdin" || "$0" == "bash" ]] || [[ ! -f "${SCRIPT_PATH}" ]]; then
+        local _script_url="https://raw.githubusercontent.com/Kiss8202/argo/main/install.sh"
+        local _script_dest="/root/install.sh"
+        print_info "检测到管道安装方式，正在下载脚本到磁盘..."
+        if curl -sL -o "${_script_dest}" "${_script_url}"; then
+            chmod +x "${_script_dest}"
+            print_success "脚本已保存到 ${_script_dest}，重新执行中..."
+            exec bash "${_script_dest}" "$@"
+        else
+            print_warning "无法从GitHub下载脚本，继续运行但快捷命令 sb 可能无法创建"
+        fi
+    fi
+    
     detect_system
     install_singbox
     mkdir -p /etc/sing-box
