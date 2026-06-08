@@ -3246,8 +3246,33 @@ generate_config() {
         outbounds_array+=("$relay_json")
     done
     
-    # 添加 direct outbound
-    local direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+    # 添加 direct outbound（根据出站模式设置绑定地址）
+    local direct_outbound
+    if [[ "$OUTBOUND_IP_MODE" == "ipv6" ]]; then
+        # IPv6优先：绑定IPv6地址出站，IPv6不可用时回退IPv4
+        if [[ -n "${SERVER_IPV6}" ]]; then
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\", \"fallback_delay\": \"300ms\"}"
+        else
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+        fi
+    elif [[ "$OUTBOUND_IP_MODE" == "ipv6_only" ]]; then
+        # 仅IPv6：只绑定IPv6地址，配合block规则彻底阻断IPv4
+        if [[ -n "${SERVER_IPV6}" ]]; then
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet6_bind_address\": \"${SERVER_IPV6}\"}"
+        else
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+        fi
+    elif [[ "$OUTBOUND_IP_MODE" == "ipv4" ]]; then
+        # 仅IPv4：只绑定IPv4地址
+        if [[ -n "${SERVER_IP}" ]]; then
+            direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", \"tcp_fast_open\": false, \"inet4_bind_address\": \"${SERVER_IP}\"}"
+        else
+            direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+        fi
+    else
+        # dual 双栈：不限制绑定地址
+        direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+    fi
     outbounds_array+=("$direct_outbound")
     
     # ipv6_only 模式下添加 block outbound 用于阻断 IPv4 出站
