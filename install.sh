@@ -1187,7 +1187,7 @@ get_ip() {
         [[ -z "$INBOUND_IP_MODE" ]] && INBOUND_IP_MODE="ipv6"
         [[ -z "$OUTBOUND_IP_MODE" ]] && OUTBOUND_IP_MODE="dual"
         print_success "使用 IPv6: ${SERVER_IP}"
-        print_info "已自动设置入站为 IPv6，出站为双栈模式"
+        print_info "已自动设置入站为 IPv6，出站为双栈模式 (IPv6优先)"
     fi
     
     if [[ -n "$old_ip" && "$old_ip" != "$SERVER_IP" ]]; then
@@ -2536,7 +2536,7 @@ ip_config_menu() {
         echo -e "  ${GREEN}[3]${NC} 设置入站为双栈 (IPv4+IPv6)"
         echo -e "  ${GREEN}[4]${NC} 设置出站为 IPv4"
         echo -e "  ${GREEN}[5]${NC} 设置出站为 IPv6"
-        echo -e "  ${GREEN}[6]${NC} 设置出站为双栈 (IPv4+IPv6)"
+        echo -e "  ${GREEN}[6]${NC} 设置出站为双栈 (IPv6优先)"
         echo -e "  ${GREEN}[7]${NC} 手动修改 IPv4 地址"
         echo -e "  ${GREEN}[8]${NC} 手动修改 IPv6 地址"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
@@ -2608,8 +2608,8 @@ ip_config_menu() {
             6)
                 OUTBOUND_IP_MODE="dual"
                 save_ip_config
-                print_success "出站已设置为双栈 (IPv4+IPv6)"
-                echo -e "${YELLOW}提示: 双栈模式将同时使用 IPv4 和 IPv6，由系统自动选择${NC}"
+                print_success "出站已设置为双栈 (IPv6优先)"
+                echo -e "${YELLOW}提示: 双栈模式将优先使用 IPv6 出站，IPv6 不可用时回退到 IPv4${NC}"
                 echo -e "${YELLOW}提示: 需要重新生成配置才能生效${NC}"
                 read -p "是否立即重新生成配置? (y/N): " regen
                 if [[ "$regen" =~ ^[Yy]$ ]] && [[ -n "$INBOUNDS_JSON" ]]; then
@@ -2810,8 +2810,8 @@ delete_all_nodes() {
     INBOUND_RELAY_TAGS=()
     
     # 根据出站模式设置 DNS 策略
-    local dns_strategy="prefer_ipv4"
-    [[ "$OUTBOUND_IP_MODE" == "ipv6" ]] && dns_strategy="prefer_ipv6"
+    local dns_strategy="prefer_ipv6"
+    [[ "$OUTBOUND_IP_MODE" == "ipv4" ]] && dns_strategy="prefer_ipv4"
     
     cat > ${CONFIG_FILE} << EOFCONFIG
 {
@@ -2823,11 +2823,12 @@ delete_all_nodes() {
     "servers": [
       {
         "tag": "local",
-        "address": "local"
+        "type": "local"
       },
       {
         "tag": "remote",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ],
     "final": "remote",
@@ -3005,7 +3006,8 @@ generate_config() {
         "server": "8.8.8.8"
       }
     ],
-    "final": "remote"
+    "final": "remote",
+    "strategy": "prefer_ipv6"
   }'
     else
         dns_json='{
