@@ -1214,12 +1214,10 @@ get_random_free_port() {
     return 1
 }
 
-# 常用 SNI 域名列表
-SNI_LIST=("www.oracle.com" "www.mozilla.org" "www.bing.com" "www.microsoft.com" "www.amazon.com" "play.google.com" "www.cloudflare.com" "gateway.icloud.com" "www.yahoo.com" "dl.google.com")
-
-# 随机选择 SNI
+# 从 DEFAULT_SNI1 随机选择 SNI
 get_random_sni() {
-    echo "${SNI_LIST[$((RANDOM % ${#SNI_LIST[@]}))]}"
+    IFS=',' read -ra _sni_array <<< "${DEFAULT_SNI1}"
+    echo "${_sni_array[$((RANDOM % ${#_sni_array[@]}))]}"
 }
 
 read_port_with_check() {
