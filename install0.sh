@@ -3276,15 +3276,9 @@ modify_reality_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
@@ -3407,15 +3401,9 @@ modify_hysteria2_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
@@ -3528,15 +3516,9 @@ modify_socks5_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
@@ -3667,15 +3649,9 @@ modify_shadowtls_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
@@ -3789,15 +3765,9 @@ modify_https_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
@@ -3933,15 +3903,9 @@ modify_anytls_node() {
     done
     
     if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
         regenerate_links_from_config
-        print_info "重启服务..."
-        svc_restart
-        sleep 2
-        if svc_is_active; then
-            print_success "服务已重启"
-        else
-            print_error "服务重启失败"
-        fi
     fi
 }
 
