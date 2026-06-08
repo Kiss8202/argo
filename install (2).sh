@@ -828,7 +828,7 @@ regenerate_links_from_config() {
                         cat > "${client_config_file_ipv4}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -890,7 +890,7 @@ EOFCLIENT
                             cat > "${client_config_file_ipv6}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -1572,7 +1572,8 @@ setup_shadowtls() {
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -1660,7 +1661,8 @@ EOFCLIENT
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -3154,11 +3156,12 @@ delete_all_nodes() {
     "servers": [
       {
         "tag": "local",
-        "address": "local"
+        "type": "local"
       },
       {
         "tag": "remote",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ],
     "final": "remote",
@@ -3354,7 +3357,8 @@ generate_config() {
         "server": "8.8.8.8"
       }
     ],
-    "final": "remote"
+    "final": "remote",
+    "strategy": "prefer_ipv4"
   }'
     else
         dns_json='{
