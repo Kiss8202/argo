@@ -1223,6 +1223,30 @@ get_port_process() {
     fi
 }
 
+# 获取随机可用端口
+get_random_free_port() {
+    local port
+    local max_attempts=100
+    local attempt=0
+    while (( attempt < max_attempts )); do
+        port=$((RANDOM % 55536 + 10000))  # 10000-65535
+        if ! check_port_in_use "$port"; then
+            echo "$port"
+            return 0
+        fi
+        ((attempt++))
+    done
+    return 1
+}
+
+# 常用 SNI 域名列表
+SNI_LIST=("time.is" "itunes.apple.com" "www.bing.com" "www.microsoft.com" "www.amazon.com" "play.google.com" "www.cloudflare.com" "gateway.icloud.com" "www.yahoo.com" "dl.google.com")
+
+# 随机选择 SNI
+get_random_sni() {
+    echo "${SNI_LIST[$((RANDOM % ${#SNI_LIST[@]}))]}"
+}
+
 read_port_with_check() {
     local default_port="$1"
     
@@ -3586,12 +3610,21 @@ modify_reality_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
                     # 检查端口占用
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -3621,9 +3654,14 @@ modify_reality_node() {
             2)
                 # 修改 SNI
                 local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
+                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
                 
-                if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                    print_info "已随机生成 SNI: ${new_sni}"
+                fi
+                
+                if [[ "$new_sni" != "$current_sni" ]]; then
                     jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .reality.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
@@ -3751,11 +3789,20 @@ modify_hysteria2_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -3782,9 +3829,14 @@ modify_hysteria2_node() {
             2)
                 # 修改 SNI
                 local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
+                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
                 
-                if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                    print_info "已随机生成 SNI: ${new_sni}"
+                fi
+                
+                if [[ "$new_sni" != "$current_sni" ]]; then
                     jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
@@ -3837,12 +3889,11 @@ modify_hysteria2_node() {
                     2)
                         # 启用混淆，自定义密码
                         local obfs_pass=""
-                        read -p "请输入混淆密码: " obfs_pass
+                        read -p "请输入混淆密码 (留空随机生成): " obfs_pass
                         
                         if [[ -z "$obfs_pass" ]]; then
-                            print_error "请输入密码"
-                            read -p "按回车继续..." _
-                            continue
+                            obfs_pass=$(openssl rand -hex 16)
+                            print_info "已随机生成混淆密码: ${obfs_pass}"
                         fi
                         
                         jq --arg tag "$tag" --arg pass "$obfs_pass" '.inbounds |= map(if .tag == $tag then .obfs = {"type": "salamander", "password": $pass} else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
@@ -3965,11 +4016,20 @@ modify_socks5_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -4004,11 +4064,19 @@ modify_socks5_node() {
                 local new_user=""
                 local new_pass=""
                 
-                read -p "请输入新的用户名 (留空保持 ${auth_user:-当前}): " new_user
-                new_user=${new_user:-$auth_user}
+                read -p "请输入新的用户名 (留空随机生成): " new_user
                 
-                read -p "请输入新的密码 (留空保持 ${auth_pass:-当前}): " new_pass
-                new_pass=${new_pass:-$auth_pass}
+                if [[ -z "$new_user" ]]; then
+                    new_user="user_$(openssl rand -hex 4)"
+                    print_info "已随机生成用户名: ${new_user}"
+                fi
+                
+                read -p "请输入新的密码 (留空随机生成): " new_pass
+                
+                if [[ -z "$new_pass" ]]; then
+                    new_pass=$(openssl rand -hex 16)
+                    print_info "已随机生成密码: ${new_pass}"
+                fi
                 
                 if [[ "$new_user" != "$auth_user" ]] || [[ "$new_pass" != "$auth_pass" ]]; then
                     jq --arg tag "$tag" --arg user "$new_user" --arg pass "$new_pass" '.inbounds |= map(if .tag == $tag then .users[0].username = $user | .users[0].password = $pass else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
@@ -4116,11 +4184,20 @@ modify_shadowtls_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -4153,9 +4230,14 @@ modify_shadowtls_node() {
             2)
                 # 修改 SNI
                 local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
+                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
                 
-                if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                    print_info "已随机生成 SNI: ${new_sni}"
+                fi
+                
+                if [[ "$new_sni" != "$current_sni" ]]; then
                     jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .handshake.server = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
@@ -4269,11 +4351,20 @@ modify_https_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -4300,9 +4391,14 @@ modify_https_node() {
             2)
                 # 修改 SNI
                 local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
+                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
                 
-                if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                    print_info "已随机生成 SNI: ${new_sni}"
+                fi
+                
+                if [[ "$new_sni" != "$current_sni" ]]; then
                     # 修改 SNI 时需要重新生成自签证书
                     gen_cert_for_sni "${new_sni}"
                     jq --arg tag "$tag" --arg sni "$new_sni" --arg cert_path "${CERT_DIR}/${new_sni}/cert.pem" --arg key_path "${CERT_DIR}/${new_sni}/private.key" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni | .tls.certificate_path = $cert_path | .tls.key_path = $key_path else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
@@ -4392,11 +4488,20 @@ modify_anytls_node() {
             1)
                 # 修改端口
                 local new_port=""
-                read -p "请输入新的端口 (留空保持 ${port}): " new_port
-                new_port=${new_port:-$port}
+                read -p "请输入新的端口 (留空随机生成): " new_port
+                
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    if [[ -z "$new_port" ]]; then
+                        print_error "无法分配随机端口"
+                        read -p "按回车继续..." _
+                        continue
+                    fi
+                    print_info "已随机分配端口: ${new_port}"
+                fi
                 
                 if [[ "$new_port" != "$port" ]]; then
-                    if ! check_port "$new_port"; then
+                    if ! check_port_in_use "$new_port"; then
                         print_error "端口 ${new_port} 已被占用或无效"
                         read -p "按回车继续..." _
                         continue
@@ -4423,9 +4528,14 @@ modify_anytls_node() {
             2)
                 # 修改 SNI
                 local new_sni=""
-                read -p "请输入新的 SNI 域名 (留空保持 ${current_sni:-当前}): " new_sni
+                read -p "请输入新的 SNI 域名 (留空随机生成): " new_sni
                 
-                if [[ -n "$new_sni" ]] && [[ "$new_sni" != "$current_sni" ]]; then
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                    print_info "已随机生成 SNI: ${new_sni}"
+                fi
+                
+                if [[ "$new_sni" != "$current_sni" ]]; then
                     jq --arg tag "$tag" --arg sni "$new_sni" '.inbounds |= map(if .tag == $tag then .tls.server_name = $sni else . end)' "${CONFIG_FILE}" > "${CONFIG_FILE}.tmp" && mv "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
                     INBOUND_SNIS[$idx]="$new_sni"
                     print_success "SNI 已修改为 ${new_sni}"
