@@ -2583,9 +2583,10 @@ setup_relay() {
         echo -e "  ${GREEN}[2]${NC} 为节点配置中转"
         echo -e "  ${GREEN}[3]${NC} 删除中转链接"
         echo -e "  ${GREEN}[4]${NC} 域名分流配置"
+        echo -e "  ${GREEN}[5]${NC} 修改中转链接"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-4]: " r_choice
+        read -p "请选择 [0-5]: " r_choice
         
         case $r_choice in
             1)
@@ -2836,6 +2837,121 @@ setup_relay() {
                 ;;
             4)
                 domain_route_menu
+                ;;
+            5)
+                if [[ ${#RELAY_TAGS[@]} -eq 0 ]]; then
+                    print_warning "当前没有中转链接"
+                    continue
+                fi
+                
+                echo ""
+                echo -e "${CYAN}修改中转链接:${NC}"
+                for i in "${!RELAY_TAGS[@]}"; do
+                    idx=$((i+1))
+                    echo -e "  ${GREEN}[${idx}]${NC} ${RELAY_DESCS[$i]}"
+                done
+                echo ""
+                read -p "请选择要修改的中转 (输入 -1 取消): " edit_idx
+                
+                if [[ "$edit_idx" == "-1" ]]; then
+                    continue
+                fi
+                
+                if ! [[ "$edit_idx" =~ ^[0-9]+$ ]] || (( edit_idx < 1 || edit_idx > ${#RELAY_TAGS[@]} )); then
+                    print_error "无效选择"
+                    continue
+                fi
+                
+                local e=$((edit_idx-1))
+                local old_tag="${RELAY_TAGS[$e]}"
+                local old_desc="${RELAY_DESCS[$e]}"
+                
+                echo ""
+                echo -e "${YELLOW}当前中转: ${old_desc}${NC}"
+                echo -e "${CYAN}请输入新的中转链接 (保留原tag，分流和中转配置不受影响):${NC}"
+                echo ""
+                read -p "粘贴新的中转链接: " NEW_RELAY_LINK
+                
+                if [[ -z "$NEW_RELAY_LINK" ]]; then
+                    print_warning "未提供链接，修改取消"
+                    continue
+                fi
+                
+                echo ""
+                read -p "请输入新的描述信息 (留空则自动生成): " new_custom_desc
+                
+                # 临时保存当前数组状态，解析新链接
+                local saved_tags=("${RELAY_TAGS[@]}")
+                local saved_jsons=("${RELAY_JSONS[@]}")
+                local saved_descs=("${RELAY_DESCS[@]}")
+                
+                # 先删除旧中转，解析新链接时tag会自动生成
+                unset RELAY_TAGS[$e]
+                unset RELAY_JSONS[$e]
+                unset RELAY_DESCS[$e]
+                RELAY_TAGS=("${RELAY_TAGS[@]}")
+                RELAY_JSONS=("${RELAY_JSONS[@]}")
+                RELAY_DESCS=("${RELAY_DESCS[@]}")
+                
+                # 解析新链接
+                local parse_ok=0
+                if [[ "$NEW_RELAY_LINK" =~ ^socks ]]; then
+                    parse_socks_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^https? ]]; then
+                    parse_http_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^ss:// ]]; then
+                    parse_ss_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^vmess:// ]]; then
+                    parse_vmess_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^vless:// ]]; then
+                    parse_vless_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^trojan:// ]]; then
+                    parse_trojan_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
+                    parse_hysteria2_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^anytls:// ]]; then
+                    parse_anytls_link "$NEW_RELAY_LINK" && parse_ok=1
+                else
+                    print_error "不支持的链接格式"
+                fi
+                
+                if [[ $parse_ok -eq 1 ]]; then
+                    # 新解析的中转在数组末尾，将其替换到原位置并恢复原tag
+                    local new_idx=$(( ${#RELAY_TAGS[@]} - 1 ))
+                    local new_json="${RELAY_JSONS[$new_idx]}"
+                    local new_desc="${RELAY_DESCS[$new_idx]}"
+                    
+                    # 将新JSON中的tag替换为原tag
+                    local new_tag="${RELAY_TAGS[$new_idx]}"
+                    new_json=$(echo "$new_json" | sed "s/\"${new_tag}\"/\"${old_tag}\"/g")
+                    
+                    # 删除末尾新增的条目
+                    unset RELAY_TAGS[$new_idx]
+                    unset RELAY_JSONS[$new_idx]
+                    unset RELAY_DESCS[$new_idx]
+                    RELAY_TAGS=("${RELAY_TAGS[@]}")
+                    RELAY_JSONS=("${RELAY_JSONS[@]}")
+                    RELAY_DESCS=("${RELAY_DESCS[@]}")
+                    
+                    # 在原位置插入修改后的中转
+                    RELAY_TAGS[$e]="$old_tag"
+                    RELAY_JSONS[$e]="$new_json"
+                    RELAY_DESCS[$e]="$new_desc"
+                    
+                    save_relays_to_file
+                    print_success "中转已修改: ${old_desc} → ${new_desc}"
+                    
+                    # 重新生成配置
+                    if [[ -n "$INBOUNDS_JSON" ]]; then
+                        generate_config && start_svc
+                    fi
+                else
+                    # 解析失败，恢复原数组
+                    RELAY_TAGS=("${saved_tags[@]}")
+                    RELAY_JSONS=("${saved_jsons[@]}")
+                    RELAY_DESCS=("${saved_descs[@]}")
+                    print_error "新链接解析失败，中转配置未修改"
+                fi
                 ;;
             0)
                 break
