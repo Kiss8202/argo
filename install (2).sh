@@ -51,6 +51,10 @@ RELAY_JSONS=()       # 中转JSON配置数组
 RELAY_DESCS=()       # 中转描述数组
 RELAY_FILE="/etc/sing-box/relays.conf"
 
+# 分流规则配置
+DOMAIN_ROUTES=()     # 分流规则数组: 入站标签|匹配类型|匹配值|中转标签|描述
+DOMAIN_ROUTE_FILE="/etc/sing-box/domain_routes.conf"
+
 # 节点数组
 INBOUND_TAGS=()
 INBOUND_PORTS=()
@@ -71,7 +75,8 @@ SOCKS_USER=""
 SOCKS_PASS=""
 
 # 默认SNI
-DEFAULT_SNI="time.is"
+DEFAULT_SNI="www.oracle.com"
+DEFAULT_SNI1="www.oracle.com,www.mozilla.org"
 
 # Alpine 标记
 ALPINE=0
@@ -417,6 +422,9 @@ gen_keys() {
     if [[ -f "${KEY_FILE}" ]] && [[ -r "${KEY_FILE}" ]]; then
         print_info "从文件加载已保存的密钥..."
         while IFS='=' read -r key value; do
+            # 去除值两端的引号
+            value="${value#\"}"
+            value="${value%\"}"
             case "$key" in
                 UUID) UUID="$value" ;;
                 REALITY_PRIVATE) REALITY_PRIVATE="$value" ;;
@@ -590,24 +598,41 @@ load_inbounds_from_config() {
     
     INBOUNDS_JSON="$inbound_list"
     
-    # 从路由规则中恢复中转配置
+    # 从路由规则中恢复每个节点的默认中转（查找针对该入站且没有域名/IP条件的规则）
+    # 注意：路由规则中可能有多个匹配该入站，需要找到最后一条没有域名/IP的规则作为默认
     local route_rules=$(jq -c '.route.rules[]? // empty' "${CONFIG_FILE}" 2>/dev/null)
     if [[ -n "$route_rules" ]]; then
+        # 先收集所有入站对应的默认中转（无域名/IP条件）
+        declare -A default_relay
         while IFS= read -r rule; do
+            # 检查是否包含 inbound 字段
+            local has_inbound=$(echo "$rule" | jq -e '.inbound // empty' 2>/dev/null)
+            if [[ -z "$has_inbound" ]]; then
+                continue
+            fi
+            # 检查是否包含域名或IP条件（如果包含，则是分流规则，跳过）
+            local has_domain=$(echo "$rule" | jq -e '.domain // .domain_suffix // .domain_keyword // .domain_regex // empty' 2>/dev/null)
+            local has_ip=$(echo "$rule" | jq -e '.ip_cidr // .ip // empty' 2>/dev/null)
+            if [[ -n "$has_domain" || -n "$has_ip" ]]; then
+                continue
+            fi
+            # 这是一个默认路由规则
             local inbound_array=$(echo "$rule" | jq -r '.inbound[]? // empty' 2>/dev/null)
             local outbound=$(echo "$rule" | jq -r '.outbound // ""' 2>/dev/null)
-            
             if [[ -n "$outbound" && "$outbound" != "direct" ]]; then
                 while IFS= read -r inbound_tag; do
-                    for i in "${!INBOUND_TAGS[@]}"; do
-                        if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
-                            INBOUND_RELAY_TAGS[$i]="$outbound"
-                            break
-                        fi
-                    done
+                    default_relay["$inbound_tag"]="$outbound"
                 done <<< "$inbound_array"
             fi
         done <<< "$route_rules"
+        
+        # 应用到 INBOUND_RELAY_TAGS
+        for i in "${!INBOUND_TAGS[@]}"; do
+            local tag="${INBOUND_TAGS[$i]}"
+            if [[ -n "${default_relay[$tag]}" ]]; then
+                INBOUND_RELAY_TAGS[$i]="${default_relay[$tag]}"
+            fi
+        done
     fi
     
     return 0
@@ -647,6 +672,9 @@ regenerate_links_from_config() {
         return 1
     fi
     
+    # 加载 IP 配置
+    load_ip_config
+    
     # 遍历每个inbound生成链接
     for ((i=0; i<inbounds_count; i++)); do
         local inbound=$(jq -c ".inbounds[${i}]" "${CONFIG_FILE}" 2>/dev/null)
@@ -682,10 +710,15 @@ regenerate_links_from_config() {
                         [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                         
                         if [[ -n "$uuid" && -n "$pbk" ]]; then
-                            local link="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#Reality-${SERVER_IP}"
-                            local line="[Reality] ${SERVER_IP}:${port} (SNI: ${sni})\n${link}\n----------------------------------------\n\n"
-                            ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                            REALITY_LINKS="${REALITY_LINKS}${line}"
+                            # IPv4 链接
+                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#Reality-${SERVER_IP}"
+                            add_link "$link_ipv4" "Reality" "" "${SERVER_IP}" "${port}" "${sni}"
+                            
+                            # IPv6 链接（如果有）
+                            if [[ -n "${SERVER_IPV6}" ]]; then
+                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#Reality-[${SERVER_IPV6}]"
+                                add_link "$link_ipv6" "Reality" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                            fi
                         fi
                     else
                         # HTTPS
@@ -696,10 +729,15 @@ regenerate_links_from_config() {
                         [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                         
                         if [[ -n "$uuid" ]]; then
-                            local link="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&security=tls&sni=${sni}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
-                            local line="[HTTPS] ${SERVER_IP}:${port} (SNI: ${sni})\n${link}\n----------------------------------------\n\n"
-                            ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                            HTTPS_LINKS="${HTTPS_LINKS}${line}"
+                            # IPv4 链接
+                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&security=tls&sni=${sni}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
+                            add_link "$link_ipv4" "HTTPS" "" "${SERVER_IP}" "${port}" "${sni}"
+                            
+                            # IPv6 链接（如果有）
+                            if [[ -n "${SERVER_IPV6}" ]]; then
+                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?encryption=none&security=tls&sni=${sni}&type=tcp&allowInsecure=1#HTTPS-[${SERVER_IPV6}]"
+                                add_link "$link_ipv6" "HTTPS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                            fi
                         fi
                     fi
                 fi
@@ -721,31 +759,48 @@ regenerate_links_from_config() {
                         local end_port=$(( listen_port + port_range_num - 1 ))
                         port_part="${listen_port}-${end_port}"
                     fi
-                    local link="hysteria2://${password}@${SERVER_IP}:${port_part}?insecure=1&sni=${sni}"
+                    
+                    # IPv4 链接
+                    local link_ipv4="hysteria2://${password}@${SERVER_IP}:${port_part}?insecure=1&sni=${sni}"
                     if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
-                        link="${link}&obfs=salamander&obfs-password=${obfs_password}"
+                        link_ipv4="${link_ipv4}&obfs=salamander&obfs-password=${obfs_password}"
                     fi
-                    link="${link}#Hysteria2-${SERVER_IP}"
-                    local line="[Hysteria2] ${SERVER_IP}:${port_part} (SNI: ${sni})\n${link}\n----------------------------------------\n\n"
-                    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                    HYSTERIA2_LINKS="${HYSTERIA2_LINKS}${line}"
+                    link_ipv4="${link_ipv4}#Hysteria2-${SERVER_IP}"
+                    add_link "$link_ipv4" "Hysteria2" "" "${SERVER_IP}" "${port_part}" "${sni}"
+                    
+                    # IPv6 链接（如果有）
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local link_ipv6="hysteria2://${password}@[${SERVER_IPV6}]:${port_part}?insecure=1&sni=${sni}"
+                        if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
+                            link_ipv6="${link_ipv6}&obfs=salamander&obfs-password=${obfs_password}"
+                        fi
+                        link_ipv6="${link_ipv6}#Hysteria2-[${SERVER_IPV6}]"
+                        add_link "$link_ipv6" "Hysteria2" "" "[${SERVER_IPV6}]" "${port_part}" "${sni}"
+                    fi
                 fi
                 ;;
             "socks")
                 local username=$(echo "$inbound" | jq -r '.users[0].username // ""' 2>/dev/null)
                 local password=$(echo "$inbound" | jq -r '.users[0].password // ""' 2>/dev/null)
-                local link=""
                 
+                # IPv4 链接
+                local link_ipv4=""
                 if [[ -n "$username" && -n "$password" ]]; then
-                    link="socks5://${username}:${password}@${SERVER_IP}:${port}#SOCKS5-${SERVER_IP}"
+                    link_ipv4="socks5://${username}:${password}@${SERVER_IP}:${port}#SOCKS5-${SERVER_IP}"
                 else
-                    link="socks5://${SERVER_IP}:${port}#SOCKS5-${SERVER_IP}"
+                    link_ipv4="socks5://${SERVER_IP}:${port}#SOCKS5-${SERVER_IP}"
                 fi
+                add_link "$link_ipv4" "SOCKS5" "" "${SERVER_IP}" "${port}" ""
                 
-                if [[ -n "$link" ]]; then
-                    local line="[SOCKS5] ${SERVER_IP}:${port}\n${link}\n----------------------------------------\n\n"
-                    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                    SOCKS5_LINKS="${SOCKS5_LINKS}${line}"
+                # IPv6 链接（如果有）
+                if [[ -n "${SERVER_IPV6}" ]]; then
+                    local link_ipv6=""
+                    if [[ -n "$username" && -n "$password" ]]; then
+                        link_ipv6="socks5://${username}:${password}@[${SERVER_IPV6}]:${port}#SOCKS5-[${SERVER_IPV6}]"
+                    else
+                        link_ipv6="socks5://[${SERVER_IPV6}]:${port}#SOCKS5-[${SERVER_IPV6}]"
+                    fi
+                    add_link "$link_ipv6" "SOCKS5" "" "[${SERVER_IPV6}]" "${port}" ""
                 fi
                 ;;
             "shadowtls")
@@ -761,12 +816,16 @@ regenerate_links_from_config() {
                     
                     if [[ -n "$ss_password" ]]; then
                         local ss_userinfo=$(echo -n "${ss_method}:${ss_password}" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
-                        local plugin_json="{\"version\":\"3\",\"password\":\"${shadowtls_password}\",\"host\":\"${sni}\",\"port\":\"${port}\",\"address\":\"${SERVER_IP}\"}"
-                        local plugin_base64=$(echo -n "$plugin_json" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
-                        local link="ss://${ss_userinfo}@${SERVER_IP}:${port}?shadow-tls=${plugin_base64}#ShadowTLS-${SERVER_IP}"
                         
-                        local client_config_file="${LINK_DIR}/shadowtls_client_${port}.json"
-                        cat > "${client_config_file}" << EOFCLIENT
+                        # IPv4 链接
+                        local plugin_json_ipv4="{\"version\":\"3\",\"password\":\"${shadowtls_password}\",\"host\":\"${sni}\",\"port\":\"${port}\",\"address\":\"${SERVER_IP}\"}"
+                        local plugin_base64_ipv4=$(echo -n "$plugin_json_ipv4" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
+                        local link_ipv4="ss://${ss_userinfo}@${SERVER_IP}:${port}?shadow-tls=${plugin_base64_ipv4}#ShadowTLS-${SERVER_IP}"
+                        add_link "$link_ipv4" "ShadowTLS v3" "" "${SERVER_IP}" "${port}" "${sni}"
+                        
+                        # 生成 IPv4 客户端配置文件
+                        local client_config_file_ipv4="${LINK_DIR}/shadowtls_client_${port}_ipv4.json"
+                        cat > "${client_config_file_ipv4}" << EOFCLIENT
 {
   "log": {"level": "info"},
   "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
@@ -819,9 +878,68 @@ regenerate_links_from_config() {
 }
 EOFCLIENT
                         
-                        local line="[ShadowTLS v3] ${SERVER_IP}:${port} (SNI: ${sni})\n${link}\n客户端配置: ${client_config_file}\n----------------------------------------\n\n"
-                        ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                        SHADOWTLS_LINKS="${SHADOWTLS_LINKS}${line}"
+                        # IPv6 链接（如果有）
+                        if [[ -n "${SERVER_IPV6}" ]]; then
+                            local plugin_json_ipv6="{\"version\":\"3\",\"password\":\"${shadowtls_password}\",\"host\":\"${sni}\",\"port\":\"${port}\",\"address\":\"${SERVER_IPV6}\"}"
+                            local plugin_base64_ipv6=$(echo -n "$plugin_json_ipv6" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
+                            local link_ipv6="ss://${ss_userinfo}@[${SERVER_IPV6}]:${port}?shadow-tls=${plugin_base64_ipv6}#ShadowTLS-[${SERVER_IPV6}]"
+                            add_link "$link_ipv6" "ShadowTLS v3" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                            
+                            # 生成 IPv6 客户端配置文件
+                            local client_config_file_ipv6="${LINK_DIR}/shadowtls_client_${port}_ipv6.json"
+                            cat > "${client_config_file_ipv6}" << EOFCLIENT
+{
+  "log": {"level": "info"},
+  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080,
+      "sniff": true
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["ShadowTLS-${port}"],
+      "default": "ShadowTLS-${port}"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ShadowTLS-${port}",
+      "method": "${ss_method}",
+      "password": "${ss_password}",
+      "detour": "shadowtls-out-${port}"
+    },
+    {
+      "type": "shadowtls",
+      "tag": "shadowtls-out-${port}",
+      "server": "${SERVER_IPV6}",
+      "server_port": ${port},
+      "version": 3,
+      "password": "${shadowtls_password}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${sni}",
+        "utls": {"enabled": true, "fingerprint": "chrome"}
+      }
+    },
+    {"type": "direct", "tag": "direct"},
+    {"type": "block", "tag": "block"}
+  ],
+  "route": {
+    "rules": [
+      {"geosite": "cn", "outbound": "direct"},
+      {"geoip": "cn", "outbound": "direct"}
+    ],
+    "final": "proxy"
+  }
+}
+EOFCLIENT
+                        fi
                     fi
                 fi
                 ;;
@@ -832,10 +950,15 @@ EOFCLIENT
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
                 if [[ -n "$password" ]]; then
-                    local link="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
-                    local line="[AnyTLS] ${SERVER_IP}:${port} (SNI: ${sni})\n${link}\n----------------------------------------\n\n"
-                    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-                    ANYTLS_LINKS="${ANYTLS_LINKS}${line}"
+                    # IPv4 链接
+                    local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
+                    add_link "$link_ipv4" "AnyTLS" "" "${SERVER_IP}" "${port}" "${sni}"
+                    
+                    # IPv6 链接（如果有）
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
+                        add_link "$link_ipv6" "AnyTLS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                    fi
                 fi
                 ;;
         esac
@@ -845,6 +968,34 @@ EOFCLIENT
     save_links_to_files
 }
 
+# ==================== 链接生成辅助函数 ====================
+add_link() {
+    local link="$1"
+    local proto="$2"
+    local extra_info="$3"
+    local ip="$4"
+    local port="$5"
+    local sni="$6"
+    
+    # 生成链接文本
+    local line="[${proto}] ${ip}:${port}"
+    [[ -n "$sni" ]] && line="${line} (SNI: ${sni})"
+    line="${line}\n${link}\n----------------------------------------\n\n"
+    
+    # 添加到所有链接
+    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
+    
+    # 添加到对应的协议链接
+    case "$proto" in
+        "Reality") REALITY_LINKS="${REALITY_LINKS}${line}" ;;
+        "Hysteria2") HYSTERIA2_LINKS="${HYSTERIA2_LINKS}${line}" ;;
+        "SOCKS5") SOCKS5_LINKS="${SOCKS5_LINKS}${line}" ;;
+        "ShadowTLS v3") SHADOWTLS_LINKS="${SHADOWTLS_LINKS}${line}" ;;
+        "HTTPS") HTTPS_LINKS="${HTTPS_LINKS}${line}" ;;
+        "AnyTLS") ANYTLS_LINKS="${ANYTLS_LINKS}${line}" ;;
+    esac
+}
+
 # ==================== 监听地址获取 ====================
 get_listen_address() {
     case "${INBOUND_IP_MODE}" in
@@ -852,7 +1003,7 @@ get_listen_address() {
             echo "0.0.0.0"
             ;;
         "ipv6")
-            echo "::1"
+            echo "::"
             ;;
         "dual"|*)
             echo "::"
@@ -875,6 +1026,9 @@ EOF
 load_ip_config() {
     if [[ -f "${IP_CONFIG_FILE}" ]] && [[ -r "${IP_CONFIG_FILE}" ]]; then
         while IFS='=' read -r key value; do
+            # 去除值两端的引号
+            value="${value#\"}"
+            value="${value%\"}"
             case "$key" in
                 SERVER_IP) SERVER_IP="$value" ;;
                 SERVER_IPV6) SERVER_IPV6="$value" ;;
@@ -924,6 +1078,35 @@ load_relays_from_file() {
             RELAY_JSONS+=("$json")
         fi
     done < "${RELAY_FILE}"
+}
+
+# ==================== 分流规则管理 ====================
+save_domain_routes_to_file() {
+    mkdir -p "$(dirname "${DOMAIN_ROUTE_FILE}")"
+    
+    cat > "${DOMAIN_ROUTE_FILE}" << EOF
+# Sing-box 分流规则配置文件
+# 格式: INBOUND_TAG|MATCH_TYPE|MATCH_VALUE|RELAY_TAG|DESCRIPTION
+# MATCH_TYPE: domain_suffix(域名后缀), domain(完整域名), domain_keyword(关键词), ip_cidr(IP/CIDR)
+EOF
+    
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        echo "$route" >> "${DOMAIN_ROUTE_FILE}"
+    done
+}
+
+load_domain_routes_from_file() {
+    DOMAIN_ROUTES=()
+    
+    if [[ ! -f "${DOMAIN_ROUTE_FILE}" ]]; then
+        return 0
+    fi
+    
+    while IFS= read -r line; do
+        # 跳过注释和空行
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        DOMAIN_ROUTES+=("$line")
+    done < "${DOMAIN_ROUTE_FILE}"
 }
 
 cleanup_links() {
@@ -1077,7 +1260,7 @@ setup_reality() {
     read_port_with_check 443
     
     echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
-    echo -e "${CYAN}例如: itunes.apple.com, www.bing.com, time.is${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
     read -p "SNI域名 [${DEFAULT_SNI}]: " SNI
     SNI=${SNI:-${DEFAULT_SNI}}
     
@@ -1108,13 +1291,27 @@ setup_reality() {
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
     
-    LINK="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp#Reality-${SERVER_IP}"
-    
+    # 生成 Reality 链接 - 同时支持 IPv4 和 IPv6
     PROTO="Reality"
     EXTRA_INFO="UUID: ${UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${SHORT_ID}\nSNI: ${SNI}"
-    local line="[Reality] ${SERVER_IP}:${PORT} (SNI: ${SNI})\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    REALITY_LINKS="${REALITY_LINKS}${line}"
+    
+    # 保存新添加节点的链接（只用于显示）
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp#Reality-${SERVER_IP}"
+    add_link "$link_ipv4" "Reality" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${SNI}"
+    LINK="$link_ipv4"  # 默认链接
+    
+    # 添加到新链接显示
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Reality] ${SERVER_IP}:${PORT} (SNI: ${SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="vless://${UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp#Reality-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "Reality" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Reality] [${SERVER_IPV6}]:${PORT} (SNI: ${SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
     
     INBOUND_TAGS+=("vless-in-${PORT}")
     INBOUND_PORTS+=("${PORT}")
@@ -1132,7 +1329,7 @@ setup_hysteria2() {
     read_port_with_check 443
     
     echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
-    echo -e "${CYAN}例如: itunes.apple.com, www.bing.com, time.is${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
     read -p "SNI域名 [${DEFAULT_SNI}]: " HY2_SNI
     HY2_SNI=${HY2_SNI:-${DEFAULT_SNI}}
     
@@ -1185,21 +1382,37 @@ setup_hysteria2() {
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
     
-    LINK="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${PORT}?insecure=1&sni=${HY2_SNI}"
-    if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
-        LINK="${LINK}&obfs=salamander&obfs-password=${OBFS_PASSWORD}"
-    fi
-    LINK="${LINK}#Hysteria2-${SERVER_IP}"
-    
     PROTO="Hysteria2"
     EXTRA_INFO="密码: ${HY2_PASSWORD}\n证书: 自签证书(${HY2_SNI})\nSNI: ${HY2_SNI}"
     if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
         EXTRA_INFO="${EXTRA_INFO}\nSalamander混淆: 已启用 (密码: ${OBFS_PASSWORD})"
     fi
     
-    local line="[Hysteria2] ${SERVER_IP}:${PORT} (SNI: ${HY2_SNI})\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    HYSTERIA2_LINKS="${HYSTERIA2_LINKS}${line}"
+    # 保存新添加节点的链接（只用于显示）
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="hysteria2://${HY2_PASSWORD}@${SERVER_IP}:${PORT}?insecure=1&sni=${HY2_SNI}"
+    if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
+        link_ipv4="${link_ipv4}&obfs=salamander&obfs-password=${OBFS_PASSWORD}"
+    fi
+    link_ipv4="${link_ipv4}#Hysteria2-${SERVER_IP}"
+    add_link "$link_ipv4" "Hysteria2" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${HY2_SNI}"
+    LINK="$link_ipv4"  # 默认链接
+    
+    # 添加到新链接显示
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Hysteria2] ${SERVER_IP}:${PORT} (SNI: ${HY2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="hysteria2://${HY2_PASSWORD}@[${SERVER_IPV6}]:${PORT}?insecure=1&sni=${HY2_SNI}"
+        if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
+            link_ipv6="${link_ipv6}&obfs=salamander&obfs-password=${OBFS_PASSWORD}"
+        fi
+        link_ipv6="${link_ipv6}#Hysteria2-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "Hysteria2" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${HY2_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Hysteria2] [${SERVER_IPV6}]:${PORT} (SNI: ${HY2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
     
     INBOUND_TAGS+=("hy2-in-${PORT}")
     INBOUND_PORTS+=("${PORT}")
@@ -1230,7 +1443,6 @@ setup_socks5() {
   \"listen_port\": ${PORT},
   \"users\": [{\"username\": \"${SOCKS_USER}\", \"password\": \"${SOCKS_PASS}\"}]
 }"
-        LINK="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${PORT}#SOCKS5-${SERVER_IP}"
         EXTRA_INFO="用户名: ${SOCKS_USER}\n密码: ${SOCKS_PASS}"
     else
         local inbound="{
@@ -1239,7 +1451,6 @@ setup_socks5() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT}
 }"
-        LINK="socks5://${SERVER_IP}:${PORT}#SOCKS5-${SERVER_IP}"
         EXTRA_INFO="无认证"
     fi
     
@@ -1250,9 +1461,34 @@ setup_socks5() {
     fi
     
     PROTO="SOCKS5"
-    local line="[SOCKS5] ${SERVER_IP}:${PORT}\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    SOCKS5_LINKS="${SOCKS5_LINKS}${line}"
+    
+    # 保存新添加节点的链接（只用于显示）
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4=""
+    if [[ "$ENABLE_AUTH" =~ ^[Yy]$ ]]; then
+        link_ipv4="socks5://${SOCKS_USER}:${SOCKS_PASS}@${SERVER_IP}:${PORT}#SOCKS5-${SERVER_IP}"
+    else
+        link_ipv4="socks5://${SERVER_IP}:${PORT}#SOCKS5-${SERVER_IP}"
+    fi
+    add_link "$link_ipv4" "SOCKS5" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" ""
+    LINK="$link_ipv4"  # 默认链接
+    
+    # 添加到新链接显示
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[SOCKS5] ${SERVER_IP}:${PORT}\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6=""
+        if [[ "$ENABLE_AUTH" =~ ^[Yy]$ ]]; then
+            link_ipv6="socks5://${SOCKS_USER}:${SOCKS_PASS}@[${SERVER_IPV6}]:${PORT}#SOCKS5-[${SERVER_IPV6}]"
+        else
+            link_ipv6="socks5://[${SERVER_IPV6}]:${PORT}#SOCKS5-[${SERVER_IPV6}]"
+        fi
+        add_link "$link_ipv6" "SOCKS5" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" ""
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[SOCKS5] [${SERVER_IPV6}]:${PORT}\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
     
     INBOUND_TAGS+=("socks-in-${PORT}")
     INBOUND_PORTS+=("${PORT}")
@@ -1270,7 +1506,7 @@ setup_shadowtls() {
     read_port_with_check 443
     
     echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
-    echo -e "${CYAN}例如: itunes.apple.com, www.bing.com, time.is${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
     read -p "SNI域名 [${DEFAULT_SNI}]: " SHADOWTLS_SNI
     SHADOWTLS_SNI=${SHADOWTLS_SNI:-${DEFAULT_SNI}}
     
@@ -1302,10 +1538,6 @@ setup_shadowtls() {
 }"
     
     local ss_userinfo=$(echo -n "2022-blake3-aes-128-gcm:${SS_PASSWORD}" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
-    local plugin_json="{\"version\":\"3\",\"password\":\"${SHADOWTLS_PASSWORD}\",\"host\":\"${SHADOWTLS_SNI}\",\"port\":\"${PORT}\",\"address\":\"${SERVER_IP}\"}"
-    local plugin_base64=$(echo -n "$plugin_json" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
-    
-    LINK="ss://${ss_userinfo}@${SERVER_IP}:${PORT}?shadow-tls=${plugin_base64}#ShadowTLS-${SERVER_IP}"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -1314,13 +1546,24 @@ setup_shadowtls() {
     fi
     
     PROTO="ShadowTLS v3"
-    local line="[ShadowTLS v3] ${SERVER_IP}:${PORT} (SNI: ${SHADOWTLS_SNI})\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    SHADOWTLS_LINKS="${SHADOWTLS_LINKS}${line}"
+    EXTRA_INFO="Shadowsocks方法: 2022-blake3-aes-128-gcm\nShadowsocks密码: ${SS_PASSWORD}\nShadowTLS密码: ${SHADOWTLS_PASSWORD}\n伪装域名: ${SHADOWTLS_SNI}\n\n${RED}重要: ShadowTLS 不支持链接格式！${NC}\n${YELLOW}请使用客户端配置文件${NC}"
     
-    # 生成客户端配置文件
-    local client_config_file="${LINK_DIR}/shadowtls_client_${PORT}.json"
-    cat > "${client_config_file}" << EOFCLIENT
+    # 保存新添加节点的链接（只用于显示）
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local plugin_json_ipv4="{\"version\":\"3\",\"password\":\"${SHADOWTLS_PASSWORD}\",\"host\":\"${SHADOWTLS_SNI}\",\"port\":\"${PORT}\",\"address\":\"${SERVER_IP}\"}"
+    local plugin_base64_ipv4=$(echo -n "$plugin_json_ipv4" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
+    local link_ipv4="ss://${ss_userinfo}@${SERVER_IP}:${PORT}?shadow-tls=${plugin_base64_ipv4}#ShadowTLS-${SERVER_IP}"
+    add_link "$link_ipv4" "ShadowTLS v3" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${SHADOWTLS_SNI}"
+    LINK="$link_ipv4"  # 默认链接
+    
+    # 添加到新链接显示
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[ShadowTLS v3] ${SERVER_IP}:${PORT} (SNI: ${SHADOWTLS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # 生成 IPv4 客户端配置文件
+    local client_config_file_ipv4="${LINK_DIR}/shadowtls_client_${PORT}_ipv4.json"
+    cat > "${client_config_file_ipv4}" << EOFCLIENT
 {
   "log": {
     "level": "info"
@@ -1398,7 +1641,94 @@ setup_shadowtls() {
 }
 EOFCLIENT
     
-    EXTRA_INFO="Shadowsocks方法: 2022-blake3-aes-128-gcm\nShadowsocks密码: ${SS_PASSWORD}\nShadowTLS密码: ${SHADOWTLS_PASSWORD}\n伪装域名: ${SHADOWTLS_SNI}\n\n${RED}重要: ShadowTLS 不支持链接格式！${NC}\n${YELLOW}请使用客户端配置文件:${NC}\n  ${client_config_file}\n\n${CYAN}下载命令:${NC}\n  scp root@${SERVER_IP}:${client_config_file} ./\n\n${CYAN}或直接查看:${NC}\n  cat ${client_config_file}"
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local plugin_json_ipv6="{\"version\":\"3\",\"password\":\"${SHADOWTLS_PASSWORD}\",\"host\":\"${SHADOWTLS_SNI}\",\"port\":\"${PORT}\",\"address\":\"${SERVER_IPV6}\"}"
+        local plugin_base64_ipv6=$(echo -n "$plugin_json_ipv6" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
+        local link_ipv6="ss://${ss_userinfo}@[${SERVER_IPV6}]:${PORT}?shadow-tls=${plugin_base64_ipv6}#ShadowTLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "ShadowTLS v3" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${SHADOWTLS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[ShadowTLS v3] [${SERVER_IPV6}]:${PORT} (SNI: ${SHADOWTLS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        
+        # 生成 IPv6 客户端配置文件
+        local client_config_file_ipv6="${LINK_DIR}/shadowtls_client_${PORT}_ipv6.json"
+        cat > "${client_config_file_ipv6}" << EOFCLIENT
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "google",
+        "address": "8.8.8.8"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "127.0.0.1",
+      "listen_port": 1080,
+      "sniff": true,
+      "set_system_proxy": false
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["ShadowTLS-${PORT}"],
+      "default": "ShadowTLS-${PORT}"
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "ShadowTLS-${PORT}",
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "${SS_PASSWORD}",
+      "detour": "shadowtls-out-${PORT}"
+    },
+    {
+      "type": "shadowtls",
+      "tag": "shadowtls-out-${PORT}",
+      "server": "${SERVER_IPV6}",
+      "server_port": ${PORT},
+      "version": 3,
+      "password": "${SHADOWTLS_PASSWORD}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${SHADOWTLS_SNI}",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "geosite": "cn",
+        "outbound": "direct"
+      },
+      {
+        "geoip": "cn",
+        "outbound": "direct"
+      }
+    ],
+    "final": "proxy"
+  }
+}
+EOFCLIENT
+    fi
     
     INBOUND_TAGS+=("shadowtls-in-${PORT}")
     INBOUND_PORTS+=("${PORT}")
@@ -1407,7 +1737,10 @@ EOFCLIENT
     INBOUND_RELAY_TAGS+=("direct")
     
     print_success "ShadowTLS v3 配置完成 (SNI: ${SHADOWTLS_SNI})"
-    print_info "客户端配置文件已保存: ${client_config_file}"
+    print_info "IPv4 客户端配置文件已保存: ${client_config_file_ipv4}"
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        print_info "IPv6 客户端配置文件已保存: ${client_config_file_ipv6}"
+    fi
     save_links_to_files
 }
 
@@ -1417,7 +1750,7 @@ setup_https() {
     read_port_with_check 443
     
     echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
-    echo -e "${CYAN}例如: itunes.apple.com, www.bing.com, time.is${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
     read -p "SNI域名 [${DEFAULT_SNI}]: " HTTPS_SNI
     HTTPS_SNI=${HTTPS_SNI:-${DEFAULT_SNI}}
     
@@ -1441,8 +1774,6 @@ setup_https() {
   }
 }"
     
-    LINK="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${HTTPS_SNI}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
-    
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
     else
@@ -1451,9 +1782,24 @@ setup_https() {
     
     PROTO="HTTPS"
     EXTRA_INFO="UUID: ${UUID}\n证书: 自签证书(${HTTPS_SNI})\nSNI: ${HTTPS_SNI}"
-    local line="[HTTPS] ${SERVER_IP}:${PORT} (SNI: ${HTTPS_SNI})\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    HTTPS_LINKS="${HTTPS_LINKS}${line}"
+    
+    # 保存新添加节点的链接（只用于显示）
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="vless://${UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${HTTPS_SNI}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
+    add_link "$link_ipv4" "HTTPS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${HTTPS_SNI}"
+    LINK="$link_ipv4"  # 默认链接
+    
+    # 添加到新链接显示
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[HTTPS] ${SERVER_IP}:${PORT} (SNI: ${HTTPS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="vless://${UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${HTTPS_SNI}&type=tcp&allowInsecure=1#HTTPS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "HTTPS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${HTTPS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[HTTPS] [${SERVER_IPV6}]:${PORT} (SNI: ${HTTPS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
     
     INBOUND_TAGS+=("vless-tls-in-${PORT}")
     INBOUND_PORTS+=("${PORT}")
@@ -1465,24 +1811,55 @@ setup_https() {
     save_links_to_files
 }
 
-# ==================== AnyTLS 配置（已修复混淆显示 + 随机填充 + UDP 提示） ====================
+# ==================== AnyTLS 配置（支持内嵌 REALITY，修正版） ====================
 setup_anytls() {
     echo ""
     read_port_with_check 443
-    
-    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
-    echo -e "${CYAN}例如: itunes.apple.com, www.bing.com, time.is${NC}"
-    read -p "SNI域名 [${DEFAULT_SNI}]: " ANYTLS_SNI
+
+    echo -e "${YELLOW}是否启用 REALITY 伪装？(y/N)${NC}"
+    echo -e "${CYAN}启用后，服务端使用 AnyTLS+REALITY，客户端需使用 sing-box 并导入 JSON 配置${NC}"
+    read -p "启用 REALITY? [y/N]: " ENABLE_REALITY
+    ENABLE_REALITY=${ENABLE_REALITY:-N}
+
+    echo -e "${YELLOW}请输入 SNI 域名（用于 TLS 及 REALITY handshake）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI 域名 [${DEFAULT_SNI}]: " ANYTLS_SNI
     ANYTLS_SNI=${ANYTLS_SNI:-${DEFAULT_SNI}}
-    
-    # 是否启用填充混淆（修复：默认 Y，按回车也视为 Y）
-    read -p "是否启用随机填充混淆 (推荐)？[Y/n]: " ENABLE_PADDING
-    ENABLE_PADDING=${ENABLE_PADDING:-Y}
-    local padding_config=""
-    local padding_status="未启用"
-    # 修复：只要不是明确的 n/N，都视为启用
-    if [[ ! "$ENABLE_PADDING" =~ ^[Nn]$ ]]; then
-        padding_config="[
+
+    # 生成 AnyTLS 密码（如果还没有）
+    if [[ -z "$ANYTLS_PASSWORD" ]]; then
+        ANYTLS_PASSWORD=$(openssl rand -hex 16)
+        save_keys_to_file
+    fi
+
+    # 如果启用 REALITY，确保 REALITY 密钥对存在
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        if [[ -z "$REALITY_PRIVATE" ]]; then
+            KEYS=$(${INSTALL_DIR}/sing-box generate reality-keypair 2>/dev/null)
+            REALITY_PRIVATE=$(echo "$KEYS" | grep "PrivateKey" | awk '{print $2}')
+            REALITY_PUBLIC=$(echo "$KEYS" | grep "PublicKey" | awk '{print $2}')
+            SHORT_ID=$(openssl rand -hex 8)
+            save_keys_to_file
+        fi
+        print_info "REALITY 公钥: ${REALITY_PUBLIC}"
+        print_info "Short ID: ${SHORT_ID}"
+    else
+        # 纯 AnyTLS 需要自签证书
+        gen_cert_for_sni "${ANYTLS_SNI}"
+        # 询问是否允许不安全连接
+        echo -e "${YELLOW}是否允许跳过证书验证（insecure）？${NC}"
+        echo -e "${CYAN}允许可以简化客户端配置，但会降低安全性（中间人攻击风险）${NC}"
+        read -p "允许 insecure? [y/N]: " ALLOW_INSECURE
+        ALLOW_INSECURE=${ALLOW_INSECURE:-N}
+    fi
+
+    # 询问 uTLS 指纹（可选）
+    echo -e "${YELLOW}请输入 uTLS 指纹（默认 chrome，可选: firefox, safari, ios, android）${NC}"
+    read -p "指纹 [chrome]: " UTLS_FINGERPRINT
+    UTLS_FINGERPRINT=${UTLS_FINGERPRINT:-chrome}
+
+    # 构建 padding_scheme（默认启用随机填充）
+    local padding_config="[
     \"stop=8\",
     \"0=30-30\",
     \"1=100-400\",
@@ -1493,20 +1870,95 @@ setup_anytls() {
     \"6=500-1000\",
     \"7=500-1000\"
   ]"
-        padding_status="已启用 (官方默认)"
-        print_info "已启用随机填充混淆（官方默认策略）"
-    else
-        padding_config="[]"
-        print_info "未启用填充混淆（可能会被深度包检测识别）"
-    fi
-    
-    print_info "为 ${ANYTLS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${ANYTLS_SNI}"
-    
-    print_info "生成配置文件..."
-    
+
     local listen_addr=$(get_listen_address)
-    local inbound="{
+    local inbound=""
+    local PROTO=""
+    local EXTRA_INFO=""
+    local LINK=""
+    local CLIENT_JSON_PATH=""
+
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        # AnyTLS + REALITY 入站（无需证书）
+        inbound="{
+  \"type\": \"anytls\",
+  \"tag\": \"anytls-reality-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${ANYTLS_PASSWORD}\"}],
+  \"padding_scheme\": ${padding_config},
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${ANYTLS_SNI}\",
+    \"reality\": {
+      \"enabled\": true,
+      \"handshake\": {
+        \"server\": \"${ANYTLS_SNI}\",
+        \"server_port\": 443
+      },
+      \"private_key\": \"${REALITY_PRIVATE}\",
+      \"short_id\": [\"${SHORT_ID}\"]
+    }
+  }
+}"
+        PROTO="AnyTLS+REALITY"
+        EXTRA_INFO="密码: ${ANYTLS_PASSWORD}\nREALITY 公钥: ${REALITY_PUBLIC}\nShort ID: ${SHORT_ID}\nSNI: ${ANYTLS_SNI}"
+
+        # 生成客户端 JSON 配置文件（sing-box 格式），并根据系统选择 TUN 栈
+        local tun_stack="system"
+        if [[ "$OSTYPE" == "darwin"* ]] || [[ "$OSTYPE" == "msys"* ]] || [[ "$OSTYPE" == "cygwin"* ]]; then
+            tun_stack="gvisor"
+        fi
+        CLIENT_JSON_PATH="${LINK_DIR}/anytls_reality_client_${PORT}.json"
+        cat > "${CLIENT_JSON_PATH}" << EOF
+{
+  "log": { "level": "info" },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "sing-box0",
+      "address": ["172.19.0.1/30", "fd00::1/126"],
+      "auto_route": true,
+      "stack": "${tun_stack}"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "anytls",
+      "tag": "AnyTLS+REALITY",
+      "server": "${SERVER_IP}",
+      "server_port": ${PORT},
+      "password": "${ANYTLS_PASSWORD}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${ANYTLS_SNI}",
+        "utls": { "enabled": true, "fingerprint": "${UTLS_FINGERPRINT}" },
+        "reality": {
+          "enabled": true,
+          "public_key": "${REALITY_PUBLIC}",
+          "short_id": "${SHORT_ID}"
+        }
+      }
+    },
+    { "type": "direct", "tag": "direct" },
+    { "type": "block", "tag": "block" }
+  ],
+  "route": {
+    "final": "AnyTLS+REALITY",
+    "auto_detect_interface": true
+  }
+}
+EOF
+        chmod 644 "${CLIENT_JSON_PATH}"
+        LINK="请使用 sing-box 客户端，配置文件已保存到: ${CLIENT_JSON_PATH}"
+    else
+        # 纯 AnyTLS 入站（需要证书）
+        local insecure_bool="false"
+        if [[ "$ALLOW_INSECURE" =~ ^[Yy]$ ]]; then
+            insecure_bool="true"
+        fi
+        inbound="{
   \"type\": \"anytls\",
   \"tag\": \"anytls-in-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -1520,35 +1972,47 @@ setup_anytls() {
     \"key_path\": \"${CERT_DIR}/${ANYTLS_SNI}/private.key\"
   }
 }"
-    
-    LINK="anytls://${ANYTLS_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&fp=chrome&insecure=1&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-${SERVER_IP}"
-    
+        PROTO="AnyTLS"
+        EXTRA_INFO="密码: ${ANYTLS_PASSWORD}\n证书: 自签证书 (${ANYTLS_SNI})"
+        # 生成 anytls:// 链接，insecure 根据用户选择
+        LINK="anytls://${ANYTLS_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&fp=${UTLS_FINGERPRINT}&insecure=${insecure_bool}&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-${SERVER_IP}"
+    fi
+
+    # 并入全局 inbound JSON
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
     else
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
-    
-    PROTO="AnyTLS"
-    EXTRA_INFO="密码: ${ANYTLS_PASSWORD}\n自签证书: ${ANYTLS_SNI}\nSNI: ${ANYTLS_SNI}\n填充混淆: ${padding_status}"
-    EXTRA_INFO="${EXTRA_INFO}\n\n${GREEN}UDP 支持:${NC} AnyTLS 原生支持 UDP-over-TCP，请在客户端开启 UDP 转发即可使用。"
-    
-    local line="[AnyTLS] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n${LINK}\n----------------------------------------\n\n"
-    ALL_LINKS_TEXT="${ALL_LINKS_TEXT}${line}"
-    ANYTLS_LINKS="${ANYTLS_LINKS}${line}"
-    
-    INBOUND_TAGS+=("anytls-in-${PORT}")
+
+    # 记录节点信息
+    INBOUND_TAGS+=("anytls-${PORT}")
     INBOUND_PORTS+=("${PORT}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${ANYTLS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
-    
-    print_success "AnyTLS 配置完成 (SNI: ${ANYTLS_SNI}, 填充混淆: ${padding_status})"
+
+    # 显示新添加节点的信息（不再调用 add_link 传入无效链接）
+    CURRENT_NEW_LINKS=""
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n客户端配置文件: ${CLIENT_JSON_PATH}\n----------------------------------------\n\n"
+        # 不调用 add_link，因为 JSON 不是标准 URI
+    else
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${ANYTLS_SNI})\n${LINK}\n----------------------------------------\n\n"
+        add_link "$LINK" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${ANYTLS_SNI}"
+    fi
+
+    print_success "AnyTLS 节点添加完成 (REALITY: ${ENABLE_REALITY})"
+    if [[ "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        echo -e "${CYAN}客户端配置 JSON 已保存到: ${CLIENT_JSON_PATH}${NC}"
+        echo -e "${CYAN}请使用 sing-box 客户端运行: sing-box run -c ${CLIENT_JSON_PATH}${NC}"
+    fi
     save_links_to_files
 }
 # ==================== 中转链接解析 ====================
 parse_socks_link() {
     local link="$1"
+    local custom_desc="$2"
     
     if [[ "$link" =~ ^socks://([A-Za-z0-9+/=]+) ]]; then
         print_info "检测到 base64 编码的 SOCKS 链接，正在解码..."
@@ -1592,7 +2056,11 @@ parse_socks_link() {
   \"username\": \"${username}\",
   \"password\": \"${password}\"
 }"
-        relay_desc="SOCKS5 ${server}:${port} (认证)"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="SOCKS5 ${server}:${port} (认证)"
+        fi
     else
         local server=$(echo "$data" | cut -d':' -f1)
         local port=$(echo "$data" | cut -d':' -f2)
@@ -1610,7 +2078,11 @@ parse_socks_link() {
   \"server_port\": ${port},
   \"version\": \"5\"
 }"
-        relay_desc="SOCKS5 ${server}:${port}"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="SOCKS5 ${server}:${port}"
+        fi
     fi
     
     RELAY_TAGS+=("$tag")
@@ -1623,6 +2095,7 @@ parse_socks_link() {
 
 parse_http_link() {
     local link="$1"
+    local custom_desc="$2"
     local protocol=$(echo "$link" | cut -d':' -f1)
     local data=$(echo "$link" | sed 's|https\?://||')
     
@@ -1650,7 +2123,11 @@ parse_http_link() {
   \"password\": \"${password}\",
   \"tls\": {\"enabled\": ${tls}}
 }"
-        relay_desc="${protocol^^} ${server}:${port} (认证)"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="${protocol^^} ${server}:${port} (认证)"
+        fi
     else
         local server=$(echo "$data" | cut -d':' -f1)
         local port=$(echo "$data" | cut -d':' -f2 | cut -d'/' -f1 | cut -d'#' -f1 | cut -d'?' -f1)
@@ -1662,7 +2139,11 @@ parse_http_link() {
   \"server_port\": ${port},
   \"tls\": {\"enabled\": ${tls}}
 }"
-        relay_desc="${protocol^^} ${server}:${port}"
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="${protocol^^} ${server}:${port}"
+        fi
     fi
     
     RELAY_TAGS+=("$tag")
@@ -1675,6 +2156,7 @@ parse_http_link() {
 
 parse_ss_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|ss://||' | cut -d'#' -f1)
     
     if [[ "$data" =~ @ ]]; then
@@ -1701,7 +2183,12 @@ parse_ss_link() {
   \"method\": \"${method}\",
   \"password\": \"${password}\"
 }"
-        local relay_desc="Shadowsocks ${server}:${port}"
+        local relay_desc
+        if [[ -n "$custom_desc" ]]; then
+            relay_desc="$custom_desc"
+        else
+            relay_desc="Shadowsocks ${server}:${port}"
+        fi
         
         RELAY_TAGS+=("$tag")
         RELAY_JSONS+=("$relay_json")
@@ -1717,6 +2204,7 @@ parse_ss_link() {
 
 parse_vmess_link() {
     local link="$1"
+    local custom_desc="$2"
     local base64_data=$(echo "$link" | sed 's|vmess://||')
     local json=$(echo "$base64_data" | base64 -d 2>/dev/null)
     
@@ -1746,7 +2234,12 @@ parse_vmess_link() {
   \"alter_id\": ${alterId},
   \"security\": \"${security}\"
 }"
-    local relay_desc="VMess ${server}:${port}"
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="VMess ${server}:${port}"
+    fi
     
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
@@ -1758,58 +2251,110 @@ parse_vmess_link() {
 
 parse_vless_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|vless://||')
     local uuid=$(echo "$data" | cut -d'@' -f1)
     local server_port_params=$(echo "$data" | cut -d'@' -f2)
     local server=$(echo "$server_port_params" | cut -d':' -f1)
     local port_params=$(echo "$server_port_params" | cut -d':' -f2)
-    local port=$(echo "$port_params" | cut -d'?' -f1)
-    
-    local params=$(echo "$port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
-    
+    # 清理端口：去掉 ? 及之后，再去掉 / 及之后
+    local port=$(echo "$port_params" | cut -d'?' -f1 | sed 's|/.*||')
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    local params=$(echo "$server_port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
+
     local security="none"
     local sni=""
     local flow=""
-    
+    local pbk=""
+    local sid=""
+    local encryption="none"
+
     if [[ -n "$params" ]]; then
-        [[ "$params" =~ security=([^&]+) ]] && security="${BASH_REMATCH[1]}"
-        [[ "$params" =~ sni=([^&]+) ]] && sni="${BASH_REMATCH[1]}"
-        [[ "$params" =~ flow=([^&]+) ]] && flow="${BASH_REMATCH[1]}"
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                security) security="$value" ;;
+                sni) sni="$value" ;;
+                flow) flow="$value" ;;
+                pbk) pbk="$value" ;;
+                sid) sid="$value" ;;
+                encryption) encryption="$value" ;;
+            esac
+        done
     fi
-    
+
     local tls_config=""
-    if [[ "$security" == "tls" || "$security" == "reality" ]]; then
+    local reality_config=""
+    if [[ "$security" == "tls" ]]; then
         tls_config=",
   \"tls\": {
     \"enabled\": true,
-    \"server_name\": \"${sni}\"
+    \"server_name\": \"${sni}\",
+    \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"}
+  }"
+    elif [[ "$security" == "reality" ]]; then
+        if [[ -z "$pbk" ]]; then
+            print_error "REALITY 链接缺少公钥 (pbk)"
+            return 1
+        fi
+        reality_config=",
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"utls\": {\"enabled\": true, \"fingerprint\": \"chrome\"},
+    \"reality\": {
+      \"enabled\": true,
+      \"public_key\": \"${pbk}\",
+      \"short_id\": \"${sid}\"
+    }
   }"
     fi
-    
+
     local flow_config=""
     [[ -n "$flow" ]] && flow_config=",
   \"flow\": \"${flow}\""
-    
+
+    local encryption_config=""
+    [[ "$encryption" != "none" ]] && encryption_config=",
+  \"encryption\": \"${encryption}\""
+
     local tag="relay-vless-${#RELAY_TAGS[@]}"
     local relay_json="{
   \"type\": \"vless\",
   \"tag\": \"${tag}\",
   \"server\": \"${server}\",
   \"server_port\": ${port},
-  \"uuid\": \"${uuid}\"${flow_config}${tls_config}
+  \"uuid\": \"${uuid}\"${encryption_config}${flow_config}${tls_config}${reality_config}
 }"
-    local relay_desc="VLESS ${server}:${port}"
-    
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        if [[ "$security" == "reality" ]]; then
+            relay_desc="VLESS+REALITY ${server}:${port} (SNI: ${sni})"
+        else
+            relay_desc="VLESS ${server}:${port}"
+        fi
+    fi
+
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
     RELAY_DESCS+=("$relay_desc")
-    
+
     save_relays_to_file
     print_success "VLESS 中转已添加: ${relay_desc}"
 }
 
 parse_trojan_link() {
     local link="$1"
+    local custom_desc="$2"
     local data=$(echo "$link" | sed 's|trojan://||')
     local password=$(echo "$data" | cut -d'@' -f1)
     local server_port_params=$(echo "$data" | cut -d'@' -f2)
@@ -1834,7 +2379,12 @@ parse_trojan_link() {
     \"server_name\": \"${sni}\"
   }
 }"
-    local relay_desc="Trojan ${server}:${port}"
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="Trojan ${server}:${port}"
+    fi
     
     RELAY_TAGS+=("$tag")
     RELAY_JSONS+=("$relay_json")
@@ -1844,9 +2394,168 @@ parse_trojan_link() {
     print_success "Trojan 中转已添加: ${relay_desc}"
 }
 
+parse_hysteria2_link() {
+    local link="$1"
+    local custom_desc="$2"
+
+    # 去除协议前缀 (hy2:// 或 hysteria2://)
+    local data="${link#*://}"
+    # 提取密码 (第一个 @ 之前)
+    local userinfo="${data%%@*}"
+    local rest="${data#*@}"
+    # 提取服务器和端口 (第一个 : 分割，但要注意 IPv6 地址)
+    # 先处理可能的 IPv6 地址 [::1] 的情况，简单起见假设是普通域名/IPv4
+    local server="${rest%%:*}"
+    local port_and_params="${rest#*:}"
+    # 提取端口（第一个 ? 之前，且去除结尾的 / 或 ? 后的部分）
+    local port="${port_and_params%%[?/]*}"
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    # 提取参数部分
+    local params=""
+    if [[ "$port_and_params" == *"?"* ]]; then
+        params="${port_and_params#*?}"
+        params="${params%%#*}"  # 去除可能的 # 备注
+    fi
+
+    # 默认值
+    local password="$userinfo"
+    local sni=""
+    local insecure="false"
+    local obfs_type=""
+    local obfs_password=""
+
+    # 解析参数
+    if [[ -n "$params" ]]; then
+        # 按 & 分割
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                sni) sni="$value" ;;
+                insecure) insecure="$value" ;;
+                obfs) obfs_type="$value" ;;
+                obfs-password) obfs_password="$value" ;;
+            esac
+        done
+    fi
+
+    # 转换 insecure 为布尔值
+    local insecure_bool="false"
+    [[ "$insecure" == "1" || "$insecure" == "true" ]] && insecure_bool="true"
+
+    # 构建 tls 配置
+    local tls_config="{
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"insecure\": ${insecure_bool}
+  }"
+    local obfs_config=""
+    if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
+        obfs_config=",
+  \"obfs\": {
+    \"type\": \"salamander\",
+    \"password\": \"${obfs_password}\"
+  }"
+    fi
+
+    local tag="relay-hysteria2-${#RELAY_TAGS[@]}"
+    local relay_json="{
+  \"type\": \"hysteria2\",
+  \"tag\": \"${tag}\",
+  \"server\": \"${server}\",
+  \"server_port\": ${port},
+  \"password\": \"${password}\",
+  \"tls\": ${tls_config}${obfs_config}
+}"
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="Hysteria2 ${server}:${port} (SNI: ${sni})"
+    fi
+
+    RELAY_TAGS+=("$tag")
+    RELAY_JSONS+=("$relay_json")
+    RELAY_DESCS+=("$relay_desc")
+
+    save_relays_to_file
+    print_success "Hysteria2 中转已添加: ${relay_desc}"
+}
+
+parse_anytls_link() {
+    local link="$1"
+    local custom_desc="$2"
+    local data=$(echo "$link" | sed 's|anytls://||')
+    local userinfo=$(echo "$data" | cut -d'@' -f1)
+    local server_port_params=$(echo "$data" | cut -d'@' -f2)
+    local server=$(echo "$server_port_params" | cut -d':' -f1)
+    local port_params=$(echo "$server_port_params" | cut -d':' -f2)
+    local port=$(echo "$port_params" | cut -d'?' -f1 | sed 's|/.*||')
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    local params=$(echo "$server_port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
+    local password="$userinfo"
+    local sni=""
+    local insecure="false"
+
+    if [[ -n "$params" ]]; then
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                sni) sni="$value" ;;
+                insecure) insecure="$value" ;;
+            esac
+        done
+    fi
+
+    # 转换为布尔值
+    local insecure_bool="false"
+    [[ "$insecure" == "1" || "$insecure" == "true" ]] && insecure_bool="true"
+
+    local tag="relay-anytls-${#RELAY_TAGS[@]}"
+    local relay_json="{
+  \"type\": \"anytls\",
+  \"tag\": \"${tag}\",
+  \"server\": \"${server}\",
+  \"server_port\": ${port},
+  \"password\": \"${password}\",
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"insecure\": ${insecure_bool}
+  }
+}"
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="AnyTLS ${server}:${port} (SNI: ${sni})"
+    fi
+
+    RELAY_TAGS+=("$tag")
+    RELAY_JSONS+=("$relay_json")
+    RELAY_DESCS+=("$relay_desc")
+
+    save_relays_to_file
+    print_success "AnyTLS 中转已添加: ${relay_desc}"
+}
+
 setup_relay() {
-    # 加载中转配置
+    # 加载中转配置和分流规则
     load_relays_from_file
+    load_domain_routes_from_file
     
     while true; do
         echo ""
@@ -1871,9 +2580,10 @@ setup_relay() {
         echo -e "  ${GREEN}[1]${NC} 添加新的中转链接"
         echo -e "  ${GREEN}[2]${NC} 为节点配置中转"
         echo -e "  ${GREEN}[3]${NC} 删除中转链接"
+        echo -e "  ${GREEN}[4]${NC} 域名分流配置"
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
-        read -p "请选择 [0-3]: " r_choice
+        read -p "请选择 [0-4]: " r_choice
         
         case $r_choice in
             1)
@@ -1915,6 +2625,16 @@ setup_relay() {
                 echo -e "     trojan://password@1.2.3.4:443?sni=example.com"
                 echo -e "   ${YELLOW}支持参数:${NC} sni, type, security 等"
                 echo ""
+                echo -e "${GREEN}7. Hysteria2${NC}"
+                echo -e "   ${YELLOW}格式:${NC} hysteria2://密码@服务器:端口?参数"
+                echo -e "   ${CYAN}示例:${NC}"
+                echo -e "     hysteria2://password@1.2.3.4:443?insecure=1&sni=example.com&obfs=salamander&obfs-password=xxx"
+                echo ""
+                echo -e "${GREEN}8. AnyTLS${NC}"
+                echo -e "   ${YELLOW}格式:${NC} anytls://密码@服务器:端口?参数"
+                echo -e "   ${CYAN}示例:${NC}"
+                echo -e "     anytls://password@1.2.3.4:443?insecure=1&sni=example.com"
+                echo ""
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -e "${YELLOW}提示:${NC} 直接粘贴完整的节点分享链接即可，脚本会自动识别协议类型"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -1924,18 +2644,25 @@ setup_relay() {
                 if [[ -z "$RELAY_LINK" ]]; then
                     print_warning "未提供链接，中转配置保持不变"
                 else
+                    echo ""
+                    read -p "请输入此节点的描述信息 (如：香港-电信-1x 或 日本-软银-2x，留空则自动生成): " custom_desc
+                    
                     if [[ "$RELAY_LINK" =~ ^socks ]]; then
-                        parse_socks_link "$RELAY_LINK"
+                        parse_socks_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^https? ]]; then
-                        parse_http_link "$RELAY_LINK"
+                        parse_http_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^ss:// ]]; then
-                        parse_ss_link "$RELAY_LINK"
+                        parse_ss_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^vmess:// ]]; then
-                        parse_vmess_link "$RELAY_LINK"
+                        parse_vmess_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^vless:// ]]; then
-                        parse_vless_link "$RELAY_LINK"
+                        parse_vless_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^trojan:// ]]; then
-                        parse_trojan_link "$RELAY_LINK"
+                        parse_trojan_link "$RELAY_LINK" "$custom_desc"
+                    elif [[ "$RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
+                        parse_hysteria2_link "$RELAY_LINK" "$custom_desc"
+                    elif [[ "$RELAY_LINK" =~ ^anytls:// ]]; then
+                        parse_anytls_link "$RELAY_LINK"
                     else
                         print_error "不支持的链接格式"
                     fi
@@ -2046,7 +2773,11 @@ setup_relay() {
                             INBOUND_RELAY_TAGS[$i]="direct"
                         done
                         
-                        print_success "已删除全部中转配置"
+                        # 同时删除所有相关的分流规则
+                        DOMAIN_ROUTES=()
+                        rm -f "${DOMAIN_ROUTE_FILE}"
+                        
+                        print_success "已删除全部中转配置和相关分流规则"
                         
                         # 重新生成配置
                         if [[ -n "$INBOUNDS_JSON" ]]; then
@@ -2078,6 +2809,17 @@ setup_relay() {
                             fi
                         done
                         
+                        # 同时删除所有相关的分流规则
+                        local new_routes=()
+                        for route in "${DOMAIN_ROUTES[@]}"; do
+                            IFS='|' read -r in_tag match_type match_val relay_tag desc <<< "$route"
+                            if [[ "$relay_tag" != "$del_tag" ]]; then
+                                new_routes+=("$route")
+                            fi
+                        done
+                        DOMAIN_ROUTES=("${new_routes[@]}")
+                        save_domain_routes_to_file
+                        
                         save_relays_to_file
                         print_success "已删除中转: ${del_desc}"
                         
@@ -2089,6 +2831,9 @@ setup_relay() {
                 else
                     print_error "无效选择"
                 fi
+                ;;
+            4)
+                domain_route_menu
                 ;;
             0)
                 break
@@ -2453,7 +3198,7 @@ EOFCONFIG
         fi
     fi
 }
-# ==================== 配置生成 ====================
+# ==================== 配置生成（修复路由逻辑） ====================
 generate_config() {
     print_info "生成最终配置文件..."
 
@@ -2480,19 +3225,7 @@ generate_config() {
     done
     
     # 添加 direct outbound
-    local domain_strategy=""
-    case "${OUTBOUND_IP_MODE}" in
-        "ipv4")
-            domain_strategy='"domain_strategy": "ipv4_only", '
-            ;;
-        "ipv6")
-            domain_strategy='"domain_strategy": "ipv6_only", '
-            ;;
-        "dual"|*)
-            domain_strategy='"domain_strategy": "prefer_ipv4", '
-            ;;
-    esac
-    local direct_outbound="{\"type\": \"direct\", \"tag\": \"direct\", ${domain_strategy}\"tcp_fast_open\": false}"
+    local direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
     outbounds_array+=("$direct_outbound")
     
     # 组合 outbounds
@@ -2503,15 +3236,76 @@ generate_config() {
     done
     outbounds+="]"
     
+    # 加载分流规则
+    load_domain_routes_from_file
+    
     # 构建路由规则
     local route_rules=()
     local has_relay=0
     
-    # 为每个使用中转的节点创建路由规则
+    # 1. 首先添加所有分流域名规则（无论节点默认是中转还是直连）
+    for route in "${DOMAIN_ROUTES[@]}"; do
+        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        [[ -z "$inbound_tag" || -z "$match_type" || -z "$match_value" || -z "$relay_tag" ]] && continue
+        
+        # 检查中转是否存在
+        local relay_exists=0
+        for rt in "${RELAY_TAGS[@]}"; do
+            if [[ "$rt" == "$relay_tag" ]]; then
+                relay_exists=1
+                break
+            fi
+        done
+        if [[ $relay_exists -eq 0 ]]; then
+            print_warning "分流规则引用的中转 ${relay_tag} 不存在，跳过规则: ${match_type}=${match_value}"
+            continue
+        fi
+        
+        # 根据匹配类型生成对应的 sing-box 规则
+        local rule_part=""
+        case "$match_type" in
+            domain_suffix)
+                rule_part="\"domain_suffix\":[\"${match_value}\"]"
+                ;;
+            domain)
+                rule_part="\"domain\":[\"${match_value}\"]"
+                ;;
+            domain_keyword)
+                rule_part="\"domain_keyword\":[\"${match_value}\"]"
+                ;;
+            ip_cidr)
+                rule_part="\"ip_cidr\":[\"${match_value}\"]"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        
+        route_rules+=("{\"inbound\":[\"${inbound_tag}\"],${rule_part},\"outbound\":\"${relay_tag}\"}")
+        has_relay=1
+    done
+    
+    # 2. 为每个节点添加默认路由（仅当节点配置了中转且不是 direct）
     for i in "${!INBOUND_TAGS[@]}"; do
+        local inbound_tag="${INBOUND_TAGS[$i]}"
         local relay_tag="${INBOUND_RELAY_TAGS[$i]}"
+        
+        # 如果节点配置了具体的中转（非 direct），则添加兜底规则
         if [[ "$relay_tag" != "direct" ]]; then
-            route_rules+=("{\"inbound\":[\"${INBOUND_TAGS[$i]}\"],\"outbound\":\"${relay_tag}\"}")
+            # 检查中转是否存在
+            local relay_exists=0
+            for rt in "${RELAY_TAGS[@]}"; do
+                if [[ "$rt" == "$relay_tag" ]]; then
+                    relay_exists=1
+                    break
+                fi
+            done
+            if [[ $relay_exists -eq 0 ]]; then
+                print_warning "节点 ${inbound_tag} 配置的中转 ${relay_tag} 不存在，将改为直连"
+                INBOUND_RELAY_TAGS[$i]="direct"
+                continue
+            fi
+            route_rules+=("{\"inbound\":[\"${inbound_tag}\"],\"outbound\":\"${relay_tag}\"}")
             has_relay=1
         fi
     done
@@ -2660,12 +3454,19 @@ show_result() {
     fi
     
     echo -e "${CYAN}───────────────────────────────────────────────────────${NC}"
-    echo -e "${GREEN}📋 节点链接:${NC}"
+    echo -e "${GREEN}📋 新添加的节点链接:${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────${NC}"
     echo ""
-    echo -e "${YELLOW}${LINK}${NC}"
+    # 只显示新添加的节点链接
+    if [[ -n "$CURRENT_NEW_LINKS" ]]; then
+        echo -e "${YELLOW}${CURRENT_NEW_LINKS}${NC}"
+    else
+        echo -e "${YELLOW}${LINK}${NC}"
+    fi
     echo ""
     echo -e "${CYAN}───────────────────────────────────────────────────────${NC}"
+    echo ""
+    echo -e "${CYAN}💡 提示: 去菜单的 [配置与查看] 可以查看全部节点链接${NC}"
 }
 
 # ==================== 协议选择菜单 ====================
@@ -2683,7 +3484,7 @@ show_menu() {
     echo ""
     echo -e "${GREEN}[5]${NC} HTTPS ${CYAN}→ 标准HTTPS，可过CDN${NC}"
     echo ""
-    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用TLS协议${NC}"
+    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用 TLS 协议，可启用 REALITY 伪装${NC}"
     echo ""
     read -p "选择 [1-6]: " choice
     
@@ -2855,20 +3656,20 @@ show_main_menu() {
         fi
     fi
     echo ""
-    echo -e "  ${GREEN}[1]${NC} 添加/继续添加节点"
-    echo ""
-    echo -e "  ${GREEN}[2]${NC} 中转配置 (添加/配置/删除)"
-    echo ""
-    echo -e "  ${GREEN}[3]${NC} 出入站配置 (IPv4/IPv6)"
-    echo ""
-    echo -e "  ${GREEN}[4]${NC} 配置 / 查看节点"
-    echo ""
-    echo -e "  ${GREEN}[5]${NC} 重新生成链接文件"
-    echo ""
-    echo -e "  ${GREEN}[6]${NC} 一键删除脚本并退出"
-    echo ""
-    echo -e "  ${GREEN}[0]${NC} 退出脚本"
-    echo ""
+        echo -e "  ${GREEN}[1]${NC} 添加/继续添加节点"
+        echo ""
+        echo -e "  ${GREEN}[2]${NC} 中转配置 (添加/配置/删除/域名分流)"
+        echo ""
+        echo -e "  ${GREEN}[3]${NC} 出入站配置 (IPv4/IPv6)"
+        echo ""
+        echo -e "  ${GREEN}[4]${NC} 配置/查看节点"
+        echo ""
+        echo -e "  ${GREEN}[5]${NC} 重新生成链接文件"
+        echo ""
+        echo -e "  ${GREEN}[6]${NC} 一键删除脚本并退出"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 退出脚本"
+        echo ""
 }
 
 # ==================== 配置查看菜单 ====================
@@ -3128,6 +3929,446 @@ delete_self() {
     exit 0
 }
 
+# ==================== 域名分流配置菜单 ====================
+domain_route_menu() {
+    while true; do
+        # 加载最新的分流规则、中转和入站配置
+        load_domain_routes_from_file
+        load_relays_from_file
+        
+        show_banner
+        echo -e "${CYAN}╔═══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║              ${GREEN}域名分流配置菜单${CYAN}              ║${NC}"
+        echo -e "${CYAN}╚═══════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        
+        # 显示当前的分流规则（按入站节点分组）
+        echo -e "${YELLOW}当前分流规则 (共 ${#DOMAIN_ROUTES[@]} 条):${NC}"
+        if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
+            echo "  (暂无分流规则)"
+        else
+            # 先按入站节点分组
+            declare -A inbound_rules
+            for route in "${DOMAIN_ROUTES[@]}"; do
+                IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+                inbound_rules["$inbound_tag"]+="$route;"
+            done
+            
+            # 显示每个入站节点的分组
+            local global_idx=1
+            for inbound_tag in "${!inbound_rules[@]}"; do
+                # 获取该入站节点的详细信息
+                local inbound_proto=""
+                local inbound_port=""
+                local inbound_relay_tag=""
+                local inbound_relay_info=""
+                
+                for i in "${!INBOUND_TAGS[@]}"; do
+                    if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                        inbound_proto="${INBOUND_PROTOS[$i]}"
+                        inbound_port="${INBOUND_PORTS[$i]}"
+                        inbound_relay_tag="${INBOUND_RELAY_TAGS[$i]}"
+                        break
+                    fi
+                done
+                
+                # 获取入站节点的连接状态信息
+                if [[ "$inbound_relay_tag" == "direct" || -z "$inbound_relay_tag" ]]; then
+                    # 直连状态
+                    inbound_relay_info="📡 直连"
+                elif [[ -n "$inbound_relay_tag" ]]; then
+                    # 从 RELAY_JSONS 中提取中转配置信息
+                    for j in "${!RELAY_TAGS[@]}"; do
+                        if [[ "${RELAY_TAGS[$j]}" == "$inbound_relay_tag" ]]; then
+                            local relay_json="${RELAY_JSONS[$j]}"
+                            # 提取中转协议类型
+                            local relay_type=$(echo "$relay_json" | grep -o '"type": "[^"]*"' | cut -d'"' -f4 | tr '[:lower:]' '[:upper:]')
+                            # 提取服务器地址
+                            local relay_server=$(echo "$relay_json" | grep -o '"server": "[^"]*"' | cut -d'"' -f4)
+                            # 提取端口
+                            local relay_port=$(echo "$relay_json" | grep -o '"server_port": [0-9]*' | grep -o '[0-9]*')
+                            
+                            if [[ -n "$relay_type" && -n "$relay_server" && -n "$relay_port" ]]; then
+                                inbound_relay_info="📍 中转: ${relay_type} ${relay_server}:${relay_port}"
+                            fi
+                            break
+                        fi
+                    done
+                fi
+                
+                # 显示入站节点和连接状态
+                echo ""
+                echo -e "  ${CYAN}▶ ${inbound_proto}:${inbound_port}${NC}"
+                echo -e "  ${CYAN}   ${inbound_relay_info}${NC}"
+                
+                # 显示分流规则
+                IFS=';' read -ra routes_array <<< "${inbound_rules[$inbound_tag]}"
+                
+                for route in "${routes_array[@]}"; do
+                    [[ -z "$route" ]] && continue
+                    
+                    IFS='|' read -r tag mtype mval rtag rdesc <<< "$route"
+                    if [[ -n "$mval" ]]; then
+                        # 获取中转节点的描述
+                        local relay_node_desc="$rtag"
+                        for j in "${!RELAY_TAGS[@]}"; do
+                            if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
+                                relay_node_desc="${RELAY_DESCS[$j]}"
+                                break
+                            fi
+                        done
+                        
+                        local match_display=""
+                        case "$mtype" in
+                            domain_suffix) match_display="域名后缀" ;;
+                            domain) match_display="完整域名" ;;
+                            domain_keyword) match_display="关键词" ;;
+                            ip_cidr) match_display="IP/CIDR" ;;
+                            *) match_display="$mtype" ;;
+                        esac
+                        
+                        echo -e "    ${GREEN}[${global_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
+                        ((global_idx++))
+                    fi
+                done
+            done
+        fi
+        echo ""
+        
+        echo -e "  ${GREEN}[1]${NC} 添加分流规则"
+        echo ""
+        echo -e "  ${GREEN}[2]${NC} 删除单个分流规则"
+        echo ""
+        echo -e "  ${GREEN}[3]${NC} 清空所有分流规则"
+        echo ""
+        echo -e "  ${GREEN}[0]${NC} 返回主菜单"
+        echo ""
+        
+        read -p "请选择 [0-3]: " dr_choice
+        
+        case $dr_choice in
+            1)
+                add_domain_route
+                ;;
+            2)
+                delete_domain_route
+                ;;
+            3)
+                echo ""
+                echo -e "${YELLOW}此操作将删除所有分流规则！${NC}"
+                read -p "确认清空？(y/N): " confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    DOMAIN_ROUTES=()
+                    save_domain_routes_to_file
+                    print_success "已清空所有分流规则"
+                    # 重新生成配置
+                    if [[ -n "$INBOUNDS_JSON" ]]; then
+                        generate_config && start_svc
+                    fi
+                fi
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+        echo ""
+        read -p "按回车继续..." _
+    done
+}
+
+add_domain_route() {
+    # 检查是否有入站节点和中转节点
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_error "没有可用的入站节点，请先添加节点"
+        return 1
+    fi
+    if [[ ${#RELAY_TAGS[@]} -eq 0 ]]; then
+        print_error "没有可用的中转节点，请先添加中转"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要配置分流的入站节点:${NC}"
+    local idx=1
+    for i in "${!INBOUND_TAGS[@]}"; do
+        echo -e "  ${GREEN}[${idx}]${NC} ${INBOUND_PROTOS[$i]}:${INBOUND_PORTS[$i]} (${INBOUND_TAGS[$i]})"
+        ((idx++))
+    done
+    echo ""
+    
+    read -p "请选择 [1-$((idx-1))]: " inbound_idx
+    if ! [[ "$inbound_idx" =~ ^[0-9]+$ ]] || [[ "$inbound_idx" -lt 1 ]] || [[ "$inbound_idx" -ge "$idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    ((inbound_idx--))
+    local selected_inbound="${INBOUND_TAGS[$inbound_idx]}"
+    
+    echo ""
+    echo -e "${CYAN}选择匹配类型:${NC}"
+    echo -e "  ${GREEN}[1]${NC} domain_suffix - 域名后缀匹配 (推荐，如 time.is 匹配 time.is, a.time.is)"
+    echo -e "  ${GREEN}[2]${NC} domain - 完整域名匹配 (如 www.time.is 只匹配该域名)"
+    echo -e "  ${GREEN}[3]${NC} domain_keyword - 关键词匹配 (如 time 匹配所有含 time 的域名)"
+    echo -e "  ${GREEN}[4]${NC} ip_cidr - IP/CIDR 匹配 (如 1.2.3.4 或 1.2.3.0/24)"
+    echo ""
+    
+    read -p "请选择 [1-4]: " type_idx
+    local match_type=""
+    case "$type_idx" in
+        1) match_type="domain_suffix" ;;
+        2) match_type="domain" ;;
+        3) match_type="domain_keyword" ;;
+        4) match_type="ip_cidr" ;;
+        *)
+            print_error "无效选项"
+            return 1
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${CYAN}输入要分流的域名或IP (支持多个，用英文逗号分隔):${NC}"
+    echo -e "${YELLOW}示例: time.is, ip.sb, youtube.com${NC}"
+    echo -e "${YELLOW}       1.2.3.4, 5.6.7.0/24${NC}"
+    echo ""
+    read -p "请输入: " match_input
+    
+    # 预处理输入：替换中文逗号为英文逗号，并去除空格
+    match_input=$(echo "$match_input" | sed 's/，/,/g' | tr -d ' ')
+    
+    if [[ -z "$match_input" ]]; then
+        print_error "输入不能为空"
+        return 1
+    fi
+    
+    # 检查是否包含逗号，决定是单个还是批量
+    local is_batch=0
+    if [[ "$match_input" == *,* ]]; then
+        is_batch=1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要使用的中转节点:${NC}"
+    idx=1
+    for i in "${!RELAY_TAGS[@]}"; do
+        echo -e "  ${GREEN}[${idx}]${NC} ${RELAY_DESCS[$i]}"
+        ((idx++))
+    done
+    echo ""
+    
+    read -p "请选择 [1-$((idx-1))]: " relay_idx
+    if ! [[ "$relay_idx" =~ ^[0-9]+$ ]] || [[ "$relay_idx" -lt 1 ]] || [[ "$relay_idx" -ge "$idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    ((relay_idx--))
+    local selected_relay="${RELAY_TAGS[$relay_idx]}"
+    local selected_relay_desc="${RELAY_DESCS[$relay_idx]}"
+    
+    echo ""
+    read -p "请输入描述 (可选): " desc
+    if [[ -z "$desc" ]]; then
+        if [[ $is_batch -eq 1 ]]; then
+            desc="批量分流规则"
+        else
+            desc="分流规则"
+        fi
+    fi
+    
+    # 批量添加分流规则
+    if [[ $is_batch -eq 1 ]]; then
+        # 使用 IFS 分割字符串
+        IFS=',' read -ra MATCH_VALUES <<< "$match_input"
+        local added_count=0
+        local base_idx=${#DOMAIN_ROUTES[@]}
+        
+        for match_value in "${MATCH_VALUES[@]}"; do
+            # 去除首尾空格
+            match_value=$(echo "$match_value" | xargs)
+            if [[ -n "$match_value" ]]; then
+                local route_str="${selected_inbound}|${match_type}|${match_value}|${selected_relay}|${desc}"
+                DOMAIN_ROUTES+=("$route_str")
+                ((added_count++))
+            fi
+        done
+        
+        if [[ $added_count -gt 0 ]]; then
+            save_domain_routes_to_file
+            print_success "已添加 ${added_count} 条分流规则到入站 ${selected_inbound}，全部走 ${selected_relay_desc}"
+            echo ""
+            echo -e "${CYAN}添加的域名/IP:${NC}"
+            for match_value in "${MATCH_VALUES[@]}"; do
+                match_value=$(echo "$match_value" | xargs)
+                if [[ -n "$match_value" ]]; then
+                    echo -e "  ${GREEN}✓${NC} ${match_value}"
+                fi
+            done
+        fi
+    else
+        # 单个添加
+        local route_str="${selected_inbound}|${match_type}|${match_input}|${selected_relay}|${desc}"
+        DOMAIN_ROUTES+=("$route_str")
+        save_domain_routes_to_file
+        print_success "分流规则已添加: ${match_input} -> ${selected_relay_desc}"
+    fi
+    
+    # 重新生成配置
+    if [[ -n "$INBOUNDS_JSON" ]]; then
+        echo ""
+        read -p "是否立即重新生成配置并生效？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            generate_config && start_svc
+        fi
+    fi
+}
+
+delete_domain_route() {
+    if [[ ${#DOMAIN_ROUTES[@]} -eq 0 ]]; then
+        print_warning "没有可删除的分流规则"
+        return 0
+    fi
+    
+    echo ""
+    echo -e "${CYAN}选择要删除的分流规则 (按入站节点分组):${NC}"
+    echo ""
+    
+    # 为每条规则创建带有原始索引的结构，同时按入站分组
+    declare -A inbound_groups
+    local -A index_map
+    local display_idx=1
+    
+    for orig_idx in "${!DOMAIN_ROUTES[@]}"; do
+        local route="${DOMAIN_ROUTES[$orig_idx]}"
+        IFS='|' read -r inbound_tag match_type match_value relay_tag desc <<< "$route"
+        
+        # 存储分组信息
+        if [[ -z "${inbound_groups[$inbound_tag]}" ]]; then
+            inbound_groups[$inbound_tag]="$orig_idx|$route"
+        else
+            inbound_groups[$inbound_tag]="${inbound_groups[$inbound_tag]}
+$orig_idx|$route"
+        fi
+    done
+    
+    # 显示规则并记录显示索引到原始索引的映射
+    for inbound_tag in "${!inbound_groups[@]}"; do
+        # 获取该入站节点的详细信息
+        local inbound_proto=""
+        local inbound_port=""
+        local inbound_relay_tag=""
+        local inbound_relay_info=""
+        
+        for i in "${!INBOUND_TAGS[@]}"; do
+            if [[ "${INBOUND_TAGS[$i]}" == "$inbound_tag" ]]; then
+                inbound_proto="${INBOUND_PROTOS[$i]}"
+                inbound_port="${INBOUND_PORTS[$i]}"
+                inbound_relay_tag="${INBOUND_RELAY_TAGS[$i]}"
+                break
+            fi
+        done
+        
+        # 获取入站节点的连接状态信息
+        if [[ "$inbound_relay_tag" == "direct" || -z "$inbound_relay_tag" ]]; then
+            # 直连状态
+            inbound_relay_info="📡 直连"
+        elif [[ -n "$inbound_relay_tag" ]]; then
+            # 从 RELAY_JSONS 中提取中转配置信息
+            for j in "${!RELAY_TAGS[@]}"; do
+                if [[ "${RELAY_TAGS[$j]}" == "$inbound_relay_tag" ]]; then
+                    local relay_json="${RELAY_JSONS[$j]}"
+                    # 提取中转协议类型
+                    local relay_type=$(echo "$relay_json" | grep -o '"type": "[^"]*"' | cut -d'"' -f4 | tr '[:lower:]' '[:upper:]')
+                    # 提取服务器地址
+                    local relay_server=$(echo "$relay_json" | grep -o '"server": "[^"]*"' | cut -d'"' -f4)
+                    # 提取端口
+                    local relay_port=$(echo "$relay_json" | grep -o '"server_port": [0-9]*' | grep -o '[0-9]*')
+                    
+                    if [[ -n "$relay_type" && -n "$relay_server" && -n "$relay_port" ]]; then
+                        inbound_relay_info="📍 中转: ${relay_type} ${relay_server}:${relay_port}"
+                    fi
+                    break
+                fi
+            done
+        fi
+        
+        echo -e "  ${CYAN}▶ ${inbound_proto}:${inbound_port}${NC}"
+        echo -e "  ${CYAN}   ${inbound_relay_info}${NC}"
+        
+        local grouped_str="${inbound_groups[$inbound_tag]}"
+        local grouped_array=()
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && grouped_array+=("$line")
+        done <<< "$grouped_str"
+        
+        for item in "${grouped_array[@]}"; do
+            IFS='|' read -r orig_idx tag mtype mval rtag rdesc <<< "$item"
+            
+            # 记录显示索引到原始索引的映射
+            index_map[$display_idx]="$orig_idx"
+            
+            # 获取中转节点的描述
+            local relay_node_desc="$rtag"
+            for j in "${!RELAY_TAGS[@]}"; do
+                if [[ "${RELAY_TAGS[$j]}" == "$rtag" ]]; then
+                    relay_node_desc="${RELAY_DESCS[$j]}"
+                    break
+                fi
+            done
+            
+            local match_display=""
+            case "$mtype" in
+                domain_suffix) match_display="域名后缀" ;;
+                domain) match_display="完整域名" ;;
+                domain_keyword) match_display="关键词" ;;
+                ip_cidr) match_display="IP/CIDR" ;;
+                *) match_display="$mtype" ;;
+            esac
+            
+            echo -e "    ${GREEN}[${display_idx}]${NC} ${match_display}: ${mval} -> ${relay_node_desc}"
+            ((display_idx++))
+        done
+        echo ""
+    done
+    
+    local max_idx=$((display_idx - 1))
+    read -p "请选择要删除的规则编号 [1-$max_idx]: " delete_idx
+    if ! [[ "$delete_idx" =~ ^[0-9]+$ ]] || [[ "$delete_idx" -lt 1 ]] || [[ "$delete_idx" -gt "$max_idx" ]]; then
+        print_error "无效选项"
+        return 1
+    fi
+    
+    # 获取对应的原始索引
+    local orig_idx_to_delete="${index_map[$delete_idx]}"
+    local to_delete="${DOMAIN_ROUTES[$orig_idx_to_delete]}"
+    IFS='|' read -r del_inbound del_type del_value del_relay del_desc <<< "$to_delete"
+    
+    # 构建新数组，排除要删除的元素（使用原始索引）
+    local new_routes=()
+    for i in "${!DOMAIN_ROUTES[@]}"; do
+        if [[ "$i" -ne "$orig_idx_to_delete" ]]; then
+            new_routes+=("${DOMAIN_ROUTES[$i]}")
+        fi
+    done
+    DOMAIN_ROUTES=("${new_routes[@]}")
+    
+    save_domain_routes_to_file
+    
+    echo ""
+    print_success "已删除分流规则: ${del_type}:${del_value}"
+    echo -e "  ${CYAN}入站节点: ${del_inbound}${NC}"
+    
+    # 重新生成配置
+    if [[ -n "$INBOUNDS_JSON" ]]; then
+        echo ""
+        read -p "是否立即重新生成配置并生效？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            generate_config && start_svc
+        fi
+    fi
+}
+
 # ==================== 主循环 ====================
 main_menu() {
     while true; do
@@ -3216,8 +4457,11 @@ main() {
     # 加载中转配置
     load_relays_from_file
     
-    # 从文件加载链接
-    load_links_from_files
+    # 从配置文件重新生成链接（避免加载旧链接文件）
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        cleanup_links
+        regenerate_links_from_config
+    fi
     
     # 如果配置文件存在但链接文件为空，自动重新生成链接
     if [[ -f "${CONFIG_FILE}" ]] && [[ -z "$ALL_LINKS_TEXT" ]]; then
