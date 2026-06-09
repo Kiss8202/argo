@@ -1564,27 +1564,6 @@ setup_vless_reality() {
     local NODE_SHORT_ID=$(openssl rand -hex 8)
     print_info "Short ID: ${NODE_SHORT_ID}"
     
-    # 是否启用 multiplex
-    local NODE_MULTIPLEX=""
-    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
-    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        local NODE_MUX_PASSWORD=$(openssl rand -hex 16)
-        echo -e "${YELLOW}Multiplex 密码 (Enter=随机)${NC}"
-        read -p "密码 [${NODE_MUX_PASSWORD}]: " INPUT_MUX_PWD
-        NODE_MUX_PASSWORD=${INPUT_MUX_PWD:-${NODE_MUX_PASSWORD}}
-        print_info "Multiplex 密码: ${NODE_MUX_PASSWORD}"
-        NODE_MULTIPLEX=", \"multiplex\": {\"enabled\": true, \"padding\": true}"
-    fi
-    
-    # 是否启用 TLS fragment
-    local TLS_FRAGMENT=""
-    echo -e "${YELLOW}是否启用 TLS Fragment 分片？(y/N)${NC}"
-    read -p "启用 TLS Fragment? [y/N]: " ENABLE_FRAGMENT
-    if [[ "$ENABLE_FRAGMENT" =~ ^[Yy]$ ]]; then
-        TLS_FRAGMENT="1"
-    fi
-    
     print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
@@ -1603,7 +1582,7 @@ setup_vless_reality() {
       \"private_key\": \"${REALITY_PRIVATE}\",
       \"short_id\": [\"${NODE_SHORT_ID}\"]
     }
-  }${NODE_MULTIPLEX}
+  }
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2127,15 +2106,6 @@ setup_vless_ws_tls() {
     fi
     print_info "WS 路径: ${NODE_PATH}"
     
-    # 是否启用 multiplex
-    local NODE_MULTIPLEX=""
-    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
-    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        NODE_MULTIPLEX=",
-  \"multiplex\": {\"enabled\": true, \"padding\": true}"
-    fi
-    
     # 生成自签证书
     print_info "为 ${NODE_SNI} 生成自签证书..."
     gen_cert_for_sni "${NODE_SNI}"
@@ -2158,7 +2128,7 @@ setup_vless_ws_tls() {
     \"server_name\": \"${NODE_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }${NODE_MULTIPLEX}
+  }
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2244,15 +2214,6 @@ setup_vless_h2_tls() {
     fi
     print_info "H2 路径: ${NODE_PATH}"
     
-    # 是否启用 multiplex
-    local NODE_MULTIPLEX=""
-    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
-    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        NODE_MULTIPLEX=",
-  \"multiplex\": {\"enabled\": true, \"padding\": true}"
-    fi
-    
     # 生成自签证书
     print_info "为 ${NODE_SNI} 生成自签证书..."
     gen_cert_for_sni "${NODE_SNI}"
@@ -2275,7 +2236,7 @@ setup_vless_h2_tls() {
     \"server_name\": \"${NODE_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }${NODE_MULTIPLEX}
+  }
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2361,15 +2322,6 @@ setup_vless_httpupgrade_tls() {
     fi
     print_info "路径: ${NODE_PATH}"
     
-    # 是否启用 multiplex
-    local NODE_MULTIPLEX=""
-    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
-    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        NODE_MULTIPLEX=",
-  \"multiplex\": {\"enabled\": true, \"padding\": true}"
-    fi
-    
     # 生成自签证书
     print_info "为 ${NODE_SNI} 生成自签证书..."
     gen_cert_for_sni "${NODE_SNI}"
@@ -2392,7 +2344,7 @@ setup_vless_httpupgrade_tls() {
     \"server_name\": \"${NODE_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }${NODE_MULTIPLEX}
+  }
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2470,15 +2422,6 @@ setup_vless_http2_reality() {
     local NODE_SHORT_ID=$(openssl rand -hex 8)
     print_info "Short ID: ${NODE_SHORT_ID}"
     
-    # 是否启用 multiplex
-    local NODE_MULTIPLEX=""
-    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
-    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        NODE_MULTIPLEX=",
-  \"multiplex\": {\"enabled\": true, \"padding\": true}"
-    fi
-    
     print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
@@ -2501,7 +2444,7 @@ setup_vless_http2_reality() {
       \"private_key\": \"${REALITY_PRIVATE}\",
       \"short_id\": [\"${NODE_SHORT_ID}\"]
     }
-  }${NODE_MULTIPLEX}
+  }
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2781,11 +2724,6 @@ setup_vmess_tcp() {
         fi
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
@@ -2799,21 +2737,12 @@ setup_vmess_tcp() {
   }"
     fi
 
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
-
     local inbound="{
   \"type\": \"vmess\",
   \"tag\": \"vmess-tcp-${PORT}\",
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
-  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}]${transport_config}${multiplex_config}
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}]${transport_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2906,22 +2835,9 @@ setup_vmess_http() {
         print_info "随机 HTTP Path: ${HTTP_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"vmess\",
@@ -2933,7 +2849,7 @@ setup_vmess_http() {
     \"type\": \"http\",
     \"path\": \"${HTTP_PATH}\",
     \"headers\": {\"Host\": \"${HTTP_HOST}\"}
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3014,22 +2930,9 @@ setup_vmess_quic() {
     esac
     print_info "拥塞控制: ${CONGESTION}"
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"vmess\",
@@ -3037,7 +2940,7 @@ setup_vmess_quic() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
-  \"transport\": {\"type\": \"quic\"}${multiplex_config}
+  \"transport\": {\"type\": \"quic\"}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3119,11 +3022,6 @@ setup_vmess_ws_tls() {
         print_info "随机 WS Path: ${WS_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${VMESS_WS_SNI} 生成自签证书..."
     gen_cert_for_sni "${VMESS_WS_SNI}"
@@ -3131,14 +3029,6 @@ setup_vmess_ws_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"vmess\",
@@ -3155,7 +3045,7 @@ setup_vmess_ws_tls() {
     \"server_name\": \"${VMESS_WS_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3237,11 +3127,6 @@ setup_vmess_h2_tls() {
         print_info "随机 H2 Path: ${H2_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${VMESS_H2_SNI} 生成自签证书..."
     gen_cert_for_sni "${VMESS_H2_SNI}"
@@ -3249,14 +3134,6 @@ setup_vmess_h2_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"vmess\",
@@ -3273,7 +3150,7 @@ setup_vmess_h2_tls() {
     \"server_name\": \"${VMESS_H2_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3355,11 +3232,6 @@ setup_vmess_httpupgrade_tls() {
         print_info "随机 Path: ${HU_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${VMESS_HU_SNI} 生成自签证书..."
     gen_cert_for_sni "${VMESS_HU_SNI}"
@@ -3367,14 +3239,6 @@ setup_vmess_httpupgrade_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"vmess\",
@@ -3391,7 +3255,7 @@ setup_vmess_httpupgrade_tls() {
     \"server_name\": \"${VMESS_HU_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3465,11 +3329,6 @@ setup_trojan_tls() {
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${TROJAN_TLS_SNI} 生成自签证书..."
     gen_cert_for_sni "${TROJAN_TLS_SNI}"
@@ -3477,14 +3336,6 @@ setup_trojan_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"trojan\",
@@ -3497,7 +3348,7 @@ setup_trojan_tls() {
     \"server_name\": \"${TROJAN_TLS_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3577,11 +3428,6 @@ setup_trojan_ws_tls() {
         print_info "随机 WS Path: ${WS_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${TROJAN_WS_SNI} 生成自签证书..."
     gen_cert_for_sni "${TROJAN_WS_SNI}"
@@ -3589,14 +3435,6 @@ setup_trojan_ws_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"trojan\",
@@ -3613,7 +3451,7 @@ setup_trojan_ws_tls() {
     \"server_name\": \"${TROJAN_WS_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3693,11 +3531,6 @@ setup_trojan_h2_tls() {
         print_info "随机 H2 Path: ${H2_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${TROJAN_H2_SNI} 生成自签证书..."
     gen_cert_for_sni "${TROJAN_H2_SNI}"
@@ -3705,14 +3538,6 @@ setup_trojan_h2_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"trojan\",
@@ -3729,7 +3554,7 @@ setup_trojan_h2_tls() {
     \"server_name\": \"${TROJAN_H2_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3809,11 +3634,6 @@ setup_trojan_httpupgrade_tls() {
         print_info "随机 Path: ${HU_PATH}"
     fi
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${TROJAN_HU_SNI} 生成自签证书..."
     gen_cert_for_sni "${TROJAN_HU_SNI}"
@@ -3821,14 +3641,6 @@ setup_trojan_httpupgrade_tls() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"trojan\",
@@ -3845,7 +3657,7 @@ setup_trojan_httpupgrade_tls() {
     \"server_name\": \"${TROJAN_HU_SNI}\",
     \"certificate_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/cert.pem\",
     \"key_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/private.key\"
-  }${multiplex_config}
+  }
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3940,11 +3752,6 @@ setup_tuic() {
     read -p "是否启用 0-RTT？(y/N): " ENABLE_ZERORTT
     ENABLE_ZERORTT=${ENABLE_ZERORTT:-N}
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     # 生成自签证书
     print_info "为 ${TUIC_SNI} 生成自签证书..."
     gen_cert_for_sni "${TUIC_SNI}"
@@ -3952,14 +3759,6 @@ setup_tuic() {
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local zerortt_config=""
     if [[ "$ENABLE_ZERORTT" =~ ^[Yy]$ ]]; then
@@ -3980,7 +3779,7 @@ setup_tuic() {
     \"key_path\": \"${CERT_DIR}/${TUIC_SNI}/private.key\",
     \"alpn\": [\"h3\"]
   },
-  \"congestion_control\": \"${CONGESTION}\"${zerortt_config}${multiplex_config}
+  \"congestion_control\": \"${CONGESTION}\"${zerortt_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -4063,22 +3862,9 @@ setup_shadowsocks() {
     local NODE_SS_PASSWORD=$(openssl rand -base64 32)
     print_info "节点密码: ${NODE_SS_PASSWORD}"
 
-    # 多路复用
-    local ENABLE_MULTIPLEX="N"
-    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
-    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
-
     print_info "生成配置文件..."
 
     local listen_addr=$(get_listen_address)
-    local multiplex_config=""
-    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
-        multiplex_config=",
-  \"multiplex\": {
-    \"enabled\": true,
-    \"padding\": true
-  }"
-    fi
 
     local inbound="{
   \"type\": \"shadowsocks\",
@@ -4086,7 +3872,7 @@ setup_shadowsocks() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"method\": \"${SS_METHOD}\",
-  \"password\": \"${NODE_SS_PASSWORD}\"${multiplex_config}
+  \"password\": \"${NODE_SS_PASSWORD}\"
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -5414,7 +5200,7 @@ modify_vless_node() {
         echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
         local menu_num=1
         echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
-        local sni_num=0 path_num=0 uuid_num=0 sid_num=0 mpx_num=0
+        local sni_num=0 path_num=0 uuid_num=0 sid_num=0
         
         if [[ "$proto" =~ TLS$ || "$is_reality" -eq 1 ]]; then
             ((menu_num++)); sni_num=$menu_num
@@ -5434,10 +5220,6 @@ modify_vless_node() {
             ((menu_num++)); sid_num=$menu_num
             echo -e "  ${GREEN}[${sid_num}]${NC} 重新生成 Short ID"
         fi
-        
-        ((menu_num++)); mpx_num=$menu_num
-        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
-        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
         
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
@@ -5526,22 +5308,6 @@ modify_vless_node() {
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 config_changed=1
                 print_success "Short ID 已重新生成: ${new_sid}"
-                ;;
-            $mpx_num)
-                if [[ "$current_mpx" == "true" ]]; then
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="false"
-                    print_success "Multiplex 已关闭"
-                else
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="true"
-                    print_success "Multiplex 已启用"
-                fi
-                config_changed=1
                 ;;
             0)
                 break
@@ -5637,7 +5403,7 @@ modify_vmess_node() {
         echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
         local menu_num=1
         echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
-        local sni_num=0 path_num=0 uuid_num=0 mpx_num=0
+        local sni_num=0 path_num=0 uuid_num=0
         
         if [[ $has_tls -eq 1 ]]; then
             ((menu_num++)); sni_num=$menu_num
@@ -5652,10 +5418,6 @@ modify_vmess_node() {
         
         ((menu_num++)); uuid_num=$menu_num
         echo -e "  ${GREEN}[${uuid_num}]${NC} 重新生成 UUID"
-        
-        ((menu_num++)); mpx_num=$menu_num
-        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
-        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
         
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
@@ -5726,22 +5488,6 @@ modify_vmess_node() {
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 config_changed=1
                 print_success "UUID 已重新生成: ${new_uuid}"
-                ;;
-            $mpx_num)
-                if [[ "$current_mpx" == "true" ]]; then
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="false"
-                    print_success "Multiplex 已关闭"
-                else
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="true"
-                    print_success "Multiplex 已启用"
-                fi
-                config_changed=1
                 ;;
             0)
                 break
@@ -5826,7 +5572,7 @@ modify_trojan_node() {
         echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
         local menu_num=1
         echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
-        local sni_num=0 path_num=0 pwd_num=0 mpx_num=0
+        local sni_num=0 path_num=0 pwd_num=0
         
         ((menu_num++)); sni_num=$menu_num
         echo -e "  ${GREEN}[${sni_num}]${NC} 修改 SNI (当前: ${current_sni})"
@@ -5839,10 +5585,6 @@ modify_trojan_node() {
         
         ((menu_num++)); pwd_num=$menu_num
         echo -e "  ${GREEN}[${pwd_num}]${NC} 重新生成密码"
-        
-        ((menu_num++)); mpx_num=$menu_num
-        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
-        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
         
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
@@ -5913,22 +5655,6 @@ modify_trojan_node() {
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 config_changed=1
                 print_success "密码已重新生成: ${new_password}"
-                ;;
-            $mpx_num)
-                if [[ "$current_mpx" == "true" ]]; then
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="false"
-                    print_success "Multiplex 已关闭"
-                else
-                    jq --arg tag "$tag" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    current_mpx="true"
-                    print_success "Multiplex 已启用"
-                fi
-                config_changed=1
                 ;;
             0)
                 break
@@ -7537,30 +7263,18 @@ config_and_view_menu() {
         echo ""
         echo -e "  ${GREEN}[1]${NC} 重新加载配置并启动服务"
         echo ""
-        echo -e "  ${GREEN}[2]${NC} 查看全部节点链接"
+        echo -e "  ${GREEN}[2]${NC} 查看全部节点"
         echo ""
-        echo -e "  ${GREEN}[3]${NC} 查看 Reality 节点"
+        echo -e "  ${GREEN}[3]${NC} 修改节点配置"
         echo ""
-        echo -e "  ${GREEN}[4]${NC} 查看 Hysteria2 节点"
+        echo -e "  ${GREEN}[4]${NC} 删除单个节点"
         echo ""
-        echo -e "  ${GREEN}[5]${NC} 查看 SOCKS5 节点"
-        echo ""
-        echo -e "  ${GREEN}[6]${NC} 查看 ShadowTLS 节点"
-        echo ""
-        echo -e "  ${GREEN}[7]${NC} 查看 HTTPS 节点"
-        echo ""
-        echo -e "  ${GREEN}[8]${NC} 查看 AnyTLS 节点"
-        echo ""
-        echo -e "  ${GREEN}[9]${NC} 修改节点配置"
-        echo ""
-        echo -e "  ${GREEN}[10]${NC} 删除单个节点"
-        echo ""
-        echo -e "  ${GREEN}[11]${NC} 删除全部节点"
+        echo -e "  ${GREEN}[5]${NC} 删除全部节点"
         echo ""
         echo -e "  ${GREEN}[0]${NC} 返回主菜单"
         echo ""
         
-        read -p "请选择 [0-11]: " cv_choice
+        read -p "请选择 [0-5]: " cv_choice
         
         case $cv_choice in
             1)
@@ -7574,98 +7288,146 @@ config_and_view_menu() {
                 ;;
             2)
                 clear
-                echo -e "${YELLOW}全部节点链接:${NC}"
-                echo ""
-                if [[ -z "$ALL_LINKS_TEXT" ]]; then
-                    echo "(暂无节点)"
+                if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+                    echo -e "${YELLOW}(暂无节点)${NC}"
                 else
-                    echo -e "$ALL_LINKS_TEXT"
+                    # 构建 proto:port -> 链接文本 的映射
+                    declare -A node_links_map
+                    local current_key=""
+                    local current_text=""
+                    while IFS= read -r line; do
+                        if [[ "$line" =~ ^\[([^\]]+)\]\ [^\ ]+\:([0-9]+) ]]; then
+                            # 新节点条目开始，保存上一个
+                            if [[ -n "$current_key" && -n "$current_text" ]]; then
+                                node_links_map["$current_key"]+="${current_text}"
+                            fi
+                            local match_proto="${BASH_REMATCH[1]}"
+                            local match_port="${BASH_REMATCH[2]}"
+                            current_key="${match_proto}:${match_port}"
+                            current_text="${line}"$'\n'
+                        elif [[ "$line" == "----------------------------------------" ]]; then
+                            current_text+="${line}"$'\n'
+                            # 分隔行结束一个条目，保存
+                            if [[ -n "$current_key" && -n "$current_text" ]]; then
+                                node_links_map["$current_key"]+="${current_text}"
+                            fi
+                            current_key=""
+                            current_text=""
+                        else
+                            current_text+="${line}"$'\n'
+                        fi
+                    done <<< "$ALL_LINKS_TEXT"
+                    # 处理末尾未保存的条目
+                    if [[ -n "$current_key" && -n "$current_text" ]]; then
+                        node_links_map["$current_key"]+="${current_text}"
+                    fi
+
+                    # 定义协议分组顺序和名称
+                    local group_protos=(
+                        "VLESS"
+                        "VMess"
+                        "Trojan"
+                        "Hysteria2"
+                        "TUIC"
+                        "AnyTLS"
+                        "ShadowTLS"
+                        "Shadowsocks"
+                        "SOCKS5"
+                    )
+                    # 每个分组包含的子协议
+                    local group_vless="VLESS-REALITY VLESS-WS-TLS VLESS-H2-TLS VLESS-HTTPUpgrade-TLS VLESS-H2-REALITY"
+                    local group_vmess="VMess-TCP VMess-HTTP VMess-QUIC VMess-WS-TLS VMess-H2-TLS VMess-HTTPUpgrade-TLS"
+                    local group_trojan="Trojan-TLS Trojan-WS-TLS Trojan-H2-TLS Trojan-HTTPUpgrade-TLS"
+                    local group_hysteria2="Hysteria2"
+                    local group_tuic="TUIC"
+                    local group_anytls="AnyTLS AnyTLS+REALITY"
+                    local group_shadowtls="ShadowTLS v3"
+                    local group_shadowsocks="Shadowsocks"
+                    local group_socks5="SOCKS5"
+
+                    # 遍历每个分组
+                    for group_name in "${group_protos[@]}"; do
+                        local sub_protos_var="group_$(echo "$group_name" | tr '[:upper:]' '[:lower:]')"
+                        local sub_protos="${!sub_protos_var}"
+
+                        # 收集属于该分组的节点索引
+                        local group_indices=()
+                        for i in "${!INBOUND_TAGS[@]}"; do
+                            local proto="${INBOUND_PROTOS[$i]}"
+                            for sp in $sub_protos; do
+                                if [[ "$proto" == "$sp" ]]; then
+                                    group_indices+=("$i")
+                                    break
+                                fi
+                            done
+                        done
+
+                        # 跳过空分组
+                        [[ ${#group_indices[@]} -eq 0 ]] && continue
+
+                        # 计算中文字符填充（中文占2列宽度）
+                        local count=${#group_indices[@]}
+                        local header_text="${group_name} 节点 (${count}个)"
+                        local header_display_len=${#header_text}
+                        # 计算中文字符数以调整填充
+                        local cn_chars=0
+                        local tmp="${header_text}"
+                        while [[ "$tmp" =~ [^\x00-\x7F] ]]; do
+                            cn_chars=$((cn_chars + 1))
+                            tmp="${tmp/${BASH_REMATCH[0]}/}"
+                        done
+                        local total_display_len=$((header_display_len + cn_chars))
+                        local box_width=42
+                        local pad_total=$((box_width - 2 - total_display_len))
+                        local pad_left=$((pad_total / 2))
+                        local pad_right=$((pad_total - pad_left))
+                        local pad_l=""
+                        local pad_r=""
+                        for ((p=0; p<pad_left; p++)); do pad_l+=" "; done
+                        for ((p=0; p<pad_right; p++)); do pad_r+=" "; done
+
+                        echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+                        echo -e "${CYAN}║${NC}${pad_l}${GREEN}${header_text}${NC}${pad_r}${CYAN}║${NC}"
+                        echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
+
+                        # 显示该分组下的每个节点
+                        for idx in "${group_indices[@]}"; do
+                            local tag="${INBOUND_TAGS[$idx]}"
+                            local proto="${INBOUND_PROTOS[$idx]}"
+                            local port="${INBOUND_PORTS[$idx]}"
+                            local sni="${INBOUND_SNIS[$idx]}"
+
+                            # 节点摘要行
+                            local summary="  ${YELLOW}[${proto}]${NC} 端口:${port}"
+                            [[ -n "$sni" ]] && summary+=" SNI:${sni}"
+                            echo -e "${summary}"
+
+                            # 从映射中查找链接
+                            local lookup_key="${proto}:${port}"
+                            if [[ -n "${node_links_map[$lookup_key]}" ]]; then
+                                # 提取链接行（以协议开头的行，如 vless:// vmess:// trojan:// hysteria2:// 等）
+                                while IFS= read -r link_line; do
+                                    link_line="${link_line%$'\r'}"
+                                    if [[ "$link_line" =~ ^[a-z0-9]+:// ]]; then
+                                        echo -e "    ${link_line}"
+                                    fi
+                                done <<< "${node_links_map[$lookup_key]}"
+                            fi
+                            echo ""
+                        done
+                    done
                 fi
                 echo ""
                 read -p "按回车返回..." _
                 ;;
             3)
-                clear
-                echo -e "${YELLOW}Reality 节点:${NC}"
-                echo ""
-                if [[ -z "$REALITY_LINKS" ]]; then
-                    echo "(暂无 Reality 节点)"
-                else
-                    echo -e "$REALITY_LINKS"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            4)
-                clear
-                echo -e "${YELLOW}Hysteria2 节点:${NC}"
-                echo ""
-                if [[ -z "$HYSTERIA2_LINKS" ]]; then
-                    echo "(暂无 Hysteria2 节点)"
-                else
-                    echo -e "$HYSTERIA2_LINKS"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            5)
-                clear
-                echo -e "${YELLOW}SOCKS5 节点:${NC}"
-                echo ""
-                if [[ -z "$SOCKS5_LINKS" ]]; then
-                    echo "(暂无 SOCKS5 节点)"
-                else
-                    echo -e "$SOCKS5_LINKS"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            6)
-                clear
-                echo -e "${YELLOW}ShadowTLS 节点:${NC}"
-                echo ""
-                if [[ -z "$SHADOWTLS_LINKS" ]]; then
-                    echo "(暂无 ShadowTLS 节点)"
-                else
-                    echo -e "$SHADOWTLS_LINKS"
-                    echo ""
-                    echo -e "${CYAN}提示: 可直接复制上方 ss:// 链接导入客户端 (Shadowrocket/NekoBox/v2rayN)${NC}"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            7)
-                clear
-                echo -e "${YELLOW}HTTPS 节点:${NC}"
-                echo ""
-                if [[ -z "$HTTPS_LINKS" ]]; then
-                    echo "(暂无 HTTPS 节点)"
-                else
-                    echo -e "$HTTPS_LINKS"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            8)
-                clear
-                echo -e "${YELLOW}AnyTLS 节点:${NC}"
-                echo ""
-                if [[ -z "$ANYTLS_LINKS" ]]; then
-                    echo "(暂无 AnyTLS 节点)"
-                else
-                    echo -e "$ANYTLS_LINKS"
-                fi
-                echo ""
-                read -p "按回车返回..." _
-                ;;
-            9)
                 modify_node_menu
                 ;;
-            10)
+            4)
                 delete_single_node
                 read -p "按回车返回..." _
                 ;;
-            11)
+            5)
                 delete_all_nodes
                 read -p "按回车返回..." _
                 ;;
