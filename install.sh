@@ -80,10 +80,17 @@ DEFAULT_SNI1="www.oracle.com,www.mozilla.org"
 
 # ACME 证书配置
 ACME_EMAIL=""
-# 每个节点的证书模式: "selfsign" 或 "acme"
+# 每个节点的证书模式: "selfsign" / "acme" / "caddy"
 INBOUND_CERT_MODES=()
 # ACME 域名列表（用于生成 certificate_providers）
 ACME_DOMAINS=()
+
+# Caddy 反代配置
+CADDY_DIR="/etc/caddy"
+CADDY_SITE_DIR="${CADDY_DIR}/sites"
+CADDY_BIN="/usr/bin/caddy"
+# Caddy 节点映射: 内部端口 → 域名:公网端口/路径
+CADDY_MAPPINGS=()
 
 # Alpine 标记
 ALPINE=0
@@ -421,16 +428,23 @@ gen_cert_for_sni() {
     print_success "证书生成完成 (${sni}, 有效期100年)"
 }
 
-# 询问证书模式：自签证书 或 ACME自动签证书
+# 询问证书模式：自签证书 / ACME自动签证书 / Caddy反代
+# 参数: $1=sni, $2=支持caddy (可选 "caddy" 表示支持Caddy模式)
 # 返回值通过全局变量 ASK_CERT_MODE_RESULT
 ask_cert_mode() {
     local sni="$1"
+    local support_caddy="${2:-}"
     ASK_CERT_MODE_RESULT="selfsign"
     
     echo -e "${YELLOW}请选择证书模式:${NC}"
     echo -e "${GREEN}[1]${NC} 自签证书 ${CYAN}(无需域名，客户端需跳过证书验证)${NC}"
-    echo -e "${GREEN}[2]${NC} ACME 自动签证书 ${CYAN}(需要域名指向本服务器，Let's Encrypt 免费证书)${NC}"
-    read -p "请选择 [1-2, 默认1]: " cert_choice
+    echo -e "${GREEN}[2]${NC} ACME 自动签证书 ${CYAN}(需要域名，sing-box 内置申请 Let's Encrypt)${NC}"
+    if [[ "$support_caddy" == "caddy" ]]; then
+        echo -e "${GREEN}[3]${NC} Caddy 反代 ${CYAN}(需要域名，Caddy 自动管理证书和反向代理)${NC}"
+        read -p "请选择 [1-3, 默认1]: " cert_choice
+    else
+        read -p "请选择 [1-2, 默认1]: " cert_choice
+    fi
     case "$cert_choice" in
         2)
             ASK_CERT_MODE_RESULT="acme"
@@ -446,11 +460,171 @@ ask_cert_mode() {
             print_info "证书模式: ACME (Let's Encrypt)"
             print_warning "请确保域名 ${sni} 已解析到本服务器 IP，且 80/443 端口可访问"
             ;;
+        3)
+            if [[ "$support_caddy" != "caddy" ]]; then
+                print_error "该协议不支持 Caddy 模式"
+                ASK_CERT_MODE_RESULT="selfsign"
+                return
+            fi
+            ASK_CERT_MODE_RESULT="caddy"
+            # 安装 Caddy
+            install_caddy
+            if [[ $? -ne 0 ]]; then
+                print_error "Caddy 安装失败，回退到自签证书模式"
+                ASK_CERT_MODE_RESULT="selfsign"
+                return
+            fi
+            print_info "证书模式: Caddy 反代 (自动 HTTPS)"
+            print_warning "请确保域名 ${sni} 已解析到本服务器 IP，且 80 端口可访问"
+            ;;
         *)
             ASK_CERT_MODE_RESULT="selfsign"
             print_info "证书模式: 自签证书"
             ;;
     esac
+}
+
+# ==================== Caddy 管理 ====================
+
+# 安装 Caddy
+install_caddy() {
+    if command -v caddy &>/dev/null; then
+        print_info "Caddy 已安装"
+        return 0
+    fi
+    print_info "正在安装 Caddy..."
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl &>/dev/null
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list &>/dev/null
+        apt-get update &>/dev/null
+        apt-get install -y caddy &>/dev/null
+    elif command -v yum &>/dev/null; then
+        yum install -y yum-plugin-copr &>/dev/null
+        yum copr enable -y @caddy/caddy &>/dev/null
+        yum install -y caddy &>/dev/null
+    elif command -v dnf &>/dev/null; then
+        dnf install -y 'dnf-command(copr)' &>/dev/null
+        dnf copr enable -y @caddy/caddy &>/dev/null
+        dnf install -y caddy &>/dev/null
+    fi
+    if command -v caddy &>/dev/null; then
+        CADDY_BIN=$(command -v caddy)
+        print_success "Caddy 安装完成"
+        mkdir -p "${CADDY_SITE_DIR}"
+        return 0
+    else
+        print_error "Caddy 安装失败，请手动安装"
+        return 1
+    fi
+}
+
+# 生成 Caddy 站点配置文件
+add_caddy_site() {
+    local domain="$1"
+    local public_port="$2"
+    local internal_port="$3"
+    local path="$4"  # WS/H2/HTTPUpgrade 路径
+    
+    mkdir -p "${CADDY_SITE_DIR}"
+    
+    local site_file="${CADDY_SITE_DIR}/${domain}.conf"
+    local listen_addr="${domain}:${public_port}"
+    
+    # 如果该域名的配置文件已存在，追加反向代理规则
+    if [[ -f "${site_file}" ]]; then
+        # 检查是否已有该路径的配置
+        if grep -q "reverse_proxy.*127\.0\.0\.1:${internal_port}" "${site_file}" 2>/dev/null; then
+            return 0
+        fi
+        # 追加 handle 块
+        local handle_block=""
+        if [[ -n "$path" && "$path" != "/" ]]; then
+            handle_block="	handle_path ${path} {
+		reverse_proxy 127.0.0.1:${internal_port}
+	}"
+        else
+            handle_block="	reverse_proxy 127.0.0.1:${internal_port}"
+        fi
+        # 在文件末尾的 } 之前插入
+        sed -i "/^}/i\\${handle_block}" "${site_file}"
+    else
+        # 创建新的站点配置
+        cat > "${site_file}" << EOF
+${listen_addr} {
+	reverse_proxy 127.0.0.1:${internal_port}
+	log {
+		output discard
+	}
+}
+EOF
+        # 如果有路径，用 handle_path
+        if [[ -n "$path" && "$path" != "/" ]]; then
+            cat > "${site_file}" << EOF
+${listen_addr} {
+	handle_path ${path} {
+		reverse_proxy 127.0.0.1:${internal_port}
+	}
+	log {
+		output discard
+	}
+}
+EOF
+        fi
+    fi
+    
+    CADDY_MAPPINGS+=("${internal_port}:${domain}:${public_port}:${path}")
+}
+
+# 重载 Caddy 配置
+reload_caddy() {
+    if ! command -v caddy &>/dev/null; then
+        return 1
+    fi
+    # 合并所有站点配置到主 Caddyfile
+    local main_caddyfile="${CADDY_DIR}/Caddyfile"
+    if [[ -f "${main_caddyfile}" ]]; then
+        cp "${main_caddyfile}" "${main_caddyfile}.bak" 2>/dev/null
+    fi
+    
+    # 生成主 Caddyfile，import 所有站点配置
+    cat > "${main_caddyfile}" << EOF
+{
+	admin off
+	auto_https disable_redirects
+}
+
+import ${CADDY_SITE_DIR}/*.conf
+EOF
+    
+    # 验证并重载
+    if caddy validate --config "${main_caddyfile}" 2>/dev/null; then
+        if systemctl is-active caddy &>/dev/null; then
+            systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null
+        else
+            systemctl start caddy 2>/dev/null
+        fi
+        print_success "Caddy 配置已重载"
+        return 0
+    else
+        print_warning "Caddy 配置验证失败，尝试重启"
+        if systemctl is-active caddy &>/dev/null; then
+            systemctl restart caddy 2>/dev/null
+        else
+            systemctl start caddy 2>/dev/null
+        fi
+        return 0
+    fi
+}
+
+# 停止 Caddy
+stop_caddy() {
+    systemctl stop caddy 2>/dev/null || true
+}
+
+# 检查 Caddy 是否运行
+caddy_is_active() {
+    systemctl is-active caddy &>/dev/null
 }
 
 # ==================== 密钥管理 ====================
@@ -656,13 +830,27 @@ load_inbounds_from_config() {
         # 检测证书模式
         local has_cert_provider=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
         local cert_mode="selfsign"
+        local listen_addr=$(echo "$inbound" | jq -r '.listen // ""' 2>/dev/null)
+        local has_tls=$(echo "$inbound" | jq -r '.tls.enabled // ""' 2>/dev/null)
+        
         if [[ -n "$has_cert_provider" ]]; then
             cert_mode="acme"
+            ACME_DOMAINS+=("${sni}")
+        elif [[ "$listen_addr" == "127.0.0.1" && "$has_tls" != "true" ]]; then
+            # Caddy 模式：监听 127.0.0.1 且无 TLS
+            cert_mode="caddy"
+            # 从 transport headers 中提取 SNI
+            local transport_sni=$(echo "$inbound" | jq -r '.transport.headers.host // ""' 2>/dev/null)
+            [[ -n "$transport_sni" ]] && sni="${transport_sni}"
             ACME_DOMAINS+=("${sni}")
         fi
         
         INBOUND_TAGS+=("$tag")
-        INBOUND_PORTS+=("$port")
+        if [[ "$cert_mode" == "caddy" ]]; then
+            INBOUND_PORTS+=("443")  # Caddy 模式公网端口是 443
+        else
+            INBOUND_PORTS+=("$port")
+        fi
         INBOUND_PROTOS+=("$proto")
         INBOUND_SNIS+=("$sni")
         INBOUND_RELAY_TAGS+=("direct")  # 默认直连，稍后从路由规则更新
@@ -786,17 +974,44 @@ regenerate_links_from_config() {
         case "$type" in
             "vless")
                 local tls_enabled=$(echo "$inbound" | jq -r '.tls.enabled // false' 2>/dev/null)
-                if [[ "$tls_enabled" == "true" ]]; then
+                local listen_addr=$(echo "$inbound" | jq -r '.listen // ""' 2>/dev/null)
+                local is_caddy="no"
+                if [[ "$listen_addr" == "127.0.0.1" && "$tls_enabled" != "true" ]]; then
+                    is_caddy="yes"
+                fi
+                
+                if [[ "$tls_enabled" == "true" || "$is_caddy" == "yes" ]]; then
                     local reality_enabled=$(echo "$inbound" | jq -r '.tls.reality.enabled // false' 2>/dev/null)
-                    local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
-                    local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
-                    [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
-                    
-                    # 检查是否有 transport
-                    local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
-                    
-                    if [[ "$reality_enabled" == "true" ]]; then
+                    if [[ "$is_caddy" == "yes" ]]; then
+                        # Caddy 模式
+                        local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                        local sni=$(echo "$inbound" | jq -r '.transport.headers.host // ""' 2>/dev/null)
+                        [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                        local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
+                        local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                        
+                        if [[ -n "$uuid" ]]; then
+                            local proto_label="VLESS-WS-TLS"
+                            local link_params="encryption=none&security=tls&sni=${sni}"
+                            
+                            case "$transport_type" in
+                                ws) proto_label="VLESS-WS-TLS"; link_params="${link_params}&type=ws&path=${transport_path}" ;;
+                                http) proto_label="VLESS-H2-TLS"; link_params="${link_params}&type=h2&path=${transport_path}" ;;
+                                httpupgrade) proto_label="VLESS-HTTPUpgrade-TLS"; link_params="${link_params}&type=httpupgrade&path=${transport_path}" ;;
+                            esac
+                            
+                            local link_ipv4="vless://${uuid}@${sni}:443?${link_params}#${proto_label}-${sni}"
+                            add_link "$link_ipv4" "$proto_label" "" "${sni}" "443" "${sni}"
+                        fi
+                    elif [[ "$reality_enabled" == "true" ]]; then
                         # REALITY variants
+                        local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                        local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                        [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                        
+                        # 检查是否有 transport
+                        local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
+                        
                         local pbk=$(echo "$inbound" | jq -r '.tls.reality.public_key // ""' 2>/dev/null)
                         local sid=$(echo "$inbound" | jq -r '.tls.reality.short_id[0] // ""' 2>/dev/null)
                         
@@ -831,6 +1046,10 @@ regenerate_links_from_config() {
                         fi
                     else
                         # TLS variants (WS/H2/HTTPUpgrade or plain TLS)
+                        local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                        local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                        [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                        local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
                         if [[ -n "$uuid" ]]; then
                             local proto_label="VLESS-WS-TLS"
                             local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
@@ -878,6 +1097,12 @@ regenerate_links_from_config() {
                 local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
                 local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
                 local tls_enabled=$(echo "$inbound" | jq -r '.tls.enabled // false' 2>/dev/null)
+                local listen_addr=$(echo "$inbound" | jq -r '.listen // ""' 2>/dev/null)
+                local is_caddy="no"
+                if [[ "$listen_addr" == "127.0.0.1" && "$tls_enabled" != "true" ]]; then
+                    is_caddy="yes"
+                    sni=$(echo "$inbound" | jq -r '.transport.headers.host // ""' 2>/dev/null)
+                fi
                 
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
@@ -892,6 +1117,15 @@ regenerate_links_from_config() {
                         security="tls"
                     fi
                     
+                    # Caddy 模式特殊处理
+                    local link_host="${SERVER_IP}"
+                    local link_port="${port}"
+                    if [[ "$is_caddy" == "yes" ]]; then
+                        link_host="${sni}"
+                        link_port="443"
+                        security="tls"
+                    fi
+                    
                     case "$transport_type" in
                         ws)
                             proto_label="VMess-WS-TLS"
@@ -899,7 +1133,7 @@ regenerate_links_from_config() {
                             path_param="$transport_path"
                             ;;
                         http)
-                            if [[ "$tls_enabled" == "true" ]]; then
+                            if [[ "$tls_enabled" == "true" || "$is_caddy" == "yes" ]]; then
                                 proto_label="VMess-H2-TLS"
                             else
                                 proto_label="VMess-HTTP"
@@ -917,7 +1151,7 @@ regenerate_links_from_config() {
                             type_param="quic"
                             ;;
                         *)
-                            if [[ "$tls_enabled" != "true" ]]; then
+                            if [[ "$tls_enabled" != "true" && "$is_caddy" != "yes" ]]; then
                                 proto_label="VMess-TCP"
                             fi
                             ;;
@@ -929,15 +1163,15 @@ regenerate_links_from_config() {
                         local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
                         [[ -z "$has_acme" ]] && vmess_allow_insecure="\"allowInsecure\":\"1\","
                     fi
-                    local vmess_json="{\"v\":\"2\",\"ps\":\"${proto_label}-${SERVER_IP}\",\"add\":\"${SERVER_IP}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",${vmess_allow_insecure}\"alpn\":\"\"}"
+                    local vmess_json="{\"v\":\"2\",\"ps\":\"${proto_label}-${link_host}\",\"add\":\"${link_host}\",\"port\":\"${link_port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",${vmess_allow_insecure}\"alpn\":\"\"}"
                     local vmess_base64=$(echo -n "$vmess_json" | base64 -w0)
                     
                     # IPv4
                     local link_ipv4="vmess://${vmess_base64}"
-                    add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                    add_link "$link_ipv4" "$proto_label" "" "${link_host}" "${link_port}" "${sni}"
                     
-                    # IPv6
-                    if [[ -n "${SERVER_IPV6}" ]]; then
+                    # IPv6 (Caddy 模式不生成 IPv6 链接)
+                    if [[ -n "${SERVER_IPV6}" && "$is_caddy" != "yes" ]]; then
                         local vmess_json_v6="{\"v\":\"2\",\"ps\":\"${proto_label}-[${SERVER_IPV6}]\",\"add\":\"${SERVER_IPV6}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",${vmess_allow_insecure}\"alpn\":\"\"}"
                         local vmess_base64_v6=$(echo -n "$vmess_json_v6" | base64 -w0)
                         local link_ipv6="vmess://${vmess_base64_v6}"
@@ -950,14 +1184,23 @@ regenerate_links_from_config() {
                 local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
                 local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
                 local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                local tls_enabled=$(echo "$inbound" | jq -r '.tls.enabled // false' 2>/dev/null)
+                local listen_addr=$(echo "$inbound" | jq -r '.listen // ""' 2>/dev/null)
+                local is_caddy="no"
+                if [[ "$listen_addr" == "127.0.0.1" && "$tls_enabled" != "true" ]]; then
+                    is_caddy="yes"
+                    sni=$(echo "$inbound" | jq -r '.transport.headers.host // ""' 2>/dev/null)
+                fi
                 
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
                 if [[ -n "$password" ]]; then
                     local proto_label="Trojan-TLS"
-                    local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
                     local allow_insecure_param=""
-                    [[ -z "$has_acme" ]] && allow_insecure_param="&allowInsecure=1"
+                    if [[ "$is_caddy" != "yes" ]]; then
+                        local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                        [[ -z "$has_acme" ]] && allow_insecure_param="&allowInsecure=1"
+                    fi
                     local link_params="security=tls&sni=${sni}&type=tcp${allow_insecure_param}"
                     
                     case "$transport_type" in
@@ -975,12 +1218,19 @@ regenerate_links_from_config() {
                             ;;
                     esac
                     
-                    # IPv4
-                    local link_ipv4="trojan://${password}@${SERVER_IP}:${port}?${link_params}#${proto_label}-${SERVER_IP}"
-                    add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                    local link_host="${SERVER_IP}"
+                    local link_port="${port}"
+                    if [[ "$is_caddy" == "yes" ]]; then
+                        link_host="${sni}"
+                        link_port="443"
+                    fi
                     
-                    # IPv6
-                    if [[ -n "${SERVER_IPV6}" ]]; then
+                    # IPv4
+                    local link_ipv4="trojan://${password}@${link_host}:${link_port}?${link_params}#${proto_label}-${link_host}"
+                    add_link "$link_ipv4" "$proto_label" "" "${link_host}" "${link_port}" "${sni}"
+                    
+                    # IPv6 (Caddy 模式不生成 IPv6 链接)
+                    if [[ -n "${SERVER_IPV6}" && "$is_caddy" != "yes" ]]; then
                         local link_ipv6="trojan://${password}@[${SERVER_IPV6}]:${port}?${link_params}#${proto_label}-[${SERVER_IPV6}]"
                         add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
                     fi
@@ -2198,13 +2448,13 @@ setup_vless_ws_tls() {
     fi
     
     # 证书模式选择
-    ask_cert_mode "${NODE_SNI}"
+    ask_cert_mode "${NODE_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
-    
+
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
-    
+
     # WS path（默认/，Enter=随机8位hex）
     local NODE_PATH="/"
     local RANDOM_PATH=$(openssl rand -hex 4)
@@ -2216,10 +2466,19 @@ setup_vless_ws_tls() {
         NODE_PATH="${INPUT_PATH}"
     fi
     print_info "WS 路径: ${NODE_PATH}"
-    
+
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${NODE_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -2236,11 +2495,26 @@ setup_vless_ws_tls() {
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
   }"
     fi
-    
+
     print_info "生成配置文件..."
-    
-    local listen_addr=$(get_listen_address)
-    local inbound="{
+
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-ws-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vless\",
   \"tag\": \"vless-ws-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -2254,6 +2528,7 @@ setup_vless_ws_tls() {
   },
   ${tls_config}
 }"
+    fi
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -2262,28 +2537,45 @@ setup_vless_ws_tls() {
     fi
     
     PROTO="VLESS-WS-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\nWS路径: ${NODE_PATH}"
-    
+    local cert_info="自签证书(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${NODE_SNI})"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: ${cert_info}\nSNI: ${NODE_SNI}\nWS路径: ${NODE_PATH}"
+
     CURRENT_NEW_LINKS=""
-    
-    # IPv4 链接
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${NODE_SNI}" "443" "${PORT}" "${NODE_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${NODE_SNI}"
+        link_port="443"
+    fi
+
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "VLESS-WS-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${link_host}:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-${link_host}"
+    add_link "$link_ipv4" "VLESS-WS-TLS" "$EXTRA_INFO" "${link_host}" "${link_port}" "${NODE_SNI}"
     LINK="$link_ipv4"
-    
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
-    
-    # IPv6 链接（如果有）
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "VLESS-WS-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] ${link_host}:${link_port} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-WS-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] [${SERVER_IPV6}]:${link_port} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
-    
+
     INBOUND_TAGS+=("vless-ws-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -2326,13 +2618,13 @@ setup_vless_h2_tls() {
     fi
     
     # 证书模式选择
-    ask_cert_mode "${NODE_SNI}"
+    ask_cert_mode "${NODE_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
-    
+
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
-    
+
     # H2 path（默认/，Enter=随机）
     local NODE_PATH="/"
     local RANDOM_PATH=$(openssl rand -hex 4)
@@ -2344,10 +2636,19 @@ setup_vless_h2_tls() {
         NODE_PATH="${INPUT_PATH}"
     fi
     print_info "H2 路径: ${NODE_PATH}"
-    
+
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${NODE_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -2364,11 +2665,25 @@ setup_vless_h2_tls() {
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
   }"
     fi
-    
+
     print_info "生成配置文件..."
-    
-    local listen_addr=$(get_listen_address)
-    local inbound="{
+
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vless\",
   \"tag\": \"vless-h2-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -2381,6 +2696,7 @@ setup_vless_h2_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -2389,28 +2705,45 @@ setup_vless_h2_tls() {
     fi
 
     PROTO="VLESS-H2-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
-    
+    local cert_info="自签证书(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${NODE_SNI})"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: ${cert_info}\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
+
     CURRENT_NEW_LINKS=""
-    
-    # IPv4 链接
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${NODE_SNI}" "443" "${PORT}" "${NODE_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${NODE_SNI}"
+        link_port="443"
+    fi
+
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "VLESS-H2-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${link_host}:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-${link_host}"
+    add_link "$link_ipv4" "VLESS-H2-TLS" "$EXTRA_INFO" "${link_host}" "${link_port}" "${NODE_SNI}"
     LINK="$link_ipv4"
-    
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
-    
-    # IPv6 链接（如果有）
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "VLESS-H2-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] ${link_host}:${link_port} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-H2-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] [${SERVER_IPV6}]:${link_port} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
-    
+
     INBOUND_TAGS+=("vless-h2-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -2453,13 +2786,13 @@ setup_vless_httpupgrade_tls() {
     fi
     
     # 证书模式选择
-    ask_cert_mode "${NODE_SNI}"
+    ask_cert_mode "${NODE_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
-    
+
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
-    
+
     # Path（默认/，Enter=随机）
     local NODE_PATH="/"
     local RANDOM_PATH=$(openssl rand -hex 4)
@@ -2471,10 +2804,19 @@ setup_vless_httpupgrade_tls() {
         NODE_PATH="${INPUT_PATH}"
     fi
     print_info "路径: ${NODE_PATH}"
-    
+
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${NODE_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -2491,11 +2833,25 @@ setup_vless_httpupgrade_tls() {
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
   }"
     fi
-    
+
     print_info "生成配置文件..."
-    
-    local listen_addr=$(get_listen_address)
-    local inbound="{
+
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vless\",
   \"tag\": \"vless-hu-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -2508,6 +2864,7 @@ setup_vless_httpupgrade_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -2516,28 +2873,45 @@ setup_vless_httpupgrade_tls() {
     fi
 
     PROTO="VLESS-HTTPUpgrade-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
-    
+    local cert_info="自签证书(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${NODE_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${NODE_SNI})"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: ${cert_info}\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
+
     CURRENT_NEW_LINKS=""
-    
-    # IPv4 链接
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${NODE_SNI}" "443" "${PORT}" "${NODE_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${NODE_SNI}"
+        link_port="443"
+    fi
+
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${link_host}:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-${link_host}"
+    add_link "$link_ipv4" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "${link_host}" "${link_port}" "${NODE_SNI}"
     LINK="$link_ipv4"
-    
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
-    
-    # IPv6 链接（如果有）
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] ${link_host}:${link_port} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] [${SERVER_IPV6}]:${link_port} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
-    
+
     INBOUND_TAGS+=("vless-hu-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -3198,7 +3572,7 @@ setup_vmess_ws_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${VMESS_WS_SNI}"
+    ask_cert_mode "${VMESS_WS_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
@@ -3214,7 +3588,15 @@ setup_vmess_ws_tls() {
 
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${VMESS_WS_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3233,9 +3615,23 @@ setup_vmess_ws_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-ws-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${WS_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_WS_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vmess\",
   \"tag\": \"vmess-ws-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3249,6 +3645,7 @@ setup_vmess_ws_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3257,35 +3654,46 @@ setup_vmess_ws_tls() {
     fi
 
     PROTO="VMess-WS-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nWS Path: ${WS_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_WS_SNI})" || echo "自签证书(${VMESS_WS_SNI})")\nSNI: ${VMESS_WS_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nWS Path: ${WS_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "caddy" ]] && echo "Caddy反代(${VMESS_WS_SNI})" || ([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_WS_SNI})" || echo "自签证书(${VMESS_WS_SNI})"))\nSNI: ${VMESS_WS_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${VMESS_WS_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${link_host}"'","add":"'"${link_host}"'","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_WS_SNI}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${VMESS_WS_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${VMESS_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
     # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_WS_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${VMESS_WS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${VMESS_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("vmess-ws-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_WS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
     INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
+
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${VMESS_WS_SNI}" "443" "${PORT}" "${WS_PATH}"
+    fi
 
     print_success "VMess-WS-TLS 配置完成 (SNI: ${VMESS_WS_SNI})"
     save_links_to_files
@@ -3323,7 +3731,7 @@ setup_vmess_h2_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${VMESS_H2_SNI}"
+    ask_cert_mode "${VMESS_H2_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
@@ -3339,7 +3747,15 @@ setup_vmess_h2_tls() {
 
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${VMESS_H2_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3358,9 +3774,22 @@ setup_vmess_h2_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${H2_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_H2_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vmess\",
   \"tag\": \"vmess-h2-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3373,6 +3802,7 @@ setup_vmess_h2_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3381,35 +3811,46 @@ setup_vmess_h2_tls() {
     fi
 
     PROTO="VMess-H2-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nH2 Path: ${H2_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_H2_SNI})" || echo "自签证书(${VMESS_H2_SNI})")\nSNI: ${VMESS_H2_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nH2 Path: ${H2_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "caddy" ]] && echo "Caddy反代(${VMESS_H2_SNI})" || ([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_H2_SNI})" || echo "自签证书(${VMESS_H2_SNI})"))\nSNI: ${VMESS_H2_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${VMESS_H2_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${link_host}"'","add":"'"${link_host}"'","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_H2_SNI}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${VMESS_H2_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${VMESS_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
     # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_H2_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${VMESS_H2_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${VMESS_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("vmess-h2-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_H2_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
     INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
+
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${VMESS_H2_SNI}" "443" "${PORT}" "${H2_PATH}"
+    fi
 
     print_success "VMess-H2-TLS 配置完成 (SNI: ${VMESS_H2_SNI})"
     save_links_to_files
@@ -3447,7 +3888,7 @@ setup_vmess_httpupgrade_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${VMESS_HU_SNI}"
+    ask_cert_mode "${VMESS_HU_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
@@ -3463,7 +3904,15 @@ setup_vmess_httpupgrade_tls() {
 
     # 生成证书
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${VMESS_HU_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3482,9 +3931,22 @@ setup_vmess_httpupgrade_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${HU_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_HU_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"vmess\",
   \"tag\": \"vmess-hu-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3497,6 +3959,7 @@ setup_vmess_httpupgrade_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3505,35 +3968,46 @@ setup_vmess_httpupgrade_tls() {
     fi
 
     PROTO="VMess-HTTPUpgrade-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nPath: ${HU_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_HU_SNI})" || echo "自签证书(${VMESS_HU_SNI})")\nSNI: ${VMESS_HU_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPath: ${HU_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "caddy" ]] && echo "Caddy反代(${VMESS_HU_SNI})" || ([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_HU_SNI})" || echo "自签证书(${VMESS_HU_SNI})"))\nSNI: ${VMESS_HU_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${VMESS_HU_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${link_host}"'","add":"'"${link_host}"'","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_HU_SNI}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${VMESS_HU_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${VMESS_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
     # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${link_port}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_HU_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${VMESS_HU_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${VMESS_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("vmess-hu-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_HU_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
     INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
+
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${VMESS_HU_SNI}" "443" "${PORT}" "${HU_PATH}"
+    fi
 
     print_success "VMess-HTTPUpgrade-TLS 配置完成 (SNI: ${VMESS_HU_SNI})"
     save_links_to_files
@@ -3681,7 +4155,7 @@ setup_trojan_ws_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${TROJAN_WS_SNI}"
+    ask_cert_mode "${TROJAN_WS_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
@@ -3696,7 +4170,16 @@ setup_trojan_ws_tls() {
     fi
 
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${TROJAN_WS_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3717,9 +4200,23 @@ setup_trojan_ws_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-ws-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${WS_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_WS_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
+  }
+}"
+    else
+        inbound="{
   \"type\": \"trojan\",
   \"tag\": \"trojan-ws-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3733,6 +4230,7 @@ setup_trojan_ws_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3741,29 +4239,45 @@ setup_trojan_ws_tls() {
     fi
 
     PROTO="Trojan-WS-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nWS Path: ${WS_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_WS_SNI})" || echo "自签证书(${TROJAN_WS_SNI})")\nSNI: ${TROJAN_WS_SNI}"
+    local cert_info="自签证书(${TROJAN_WS_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${TROJAN_WS_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${TROJAN_WS_SNI})"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nWS Path: ${WS_PATH}\n证书: ${cert_info}\nSNI: ${TROJAN_WS_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${TROJAN_WS_SNI}" "443" "${PORT}" "${WS_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${TROJAN_WS_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_WS_SNI}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${link_host}:${link_port}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-${link_host}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${TROJAN_WS_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${TROJAN_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
-    # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_WS_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${TROJAN_WS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${TROJAN_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("trojan-ws-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_WS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -3805,7 +4319,7 @@ setup_trojan_h2_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${TROJAN_H2_SNI}"
+    ask_cert_mode "${TROJAN_H2_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
@@ -3820,7 +4334,16 @@ setup_trojan_h2_tls() {
     fi
 
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${TROJAN_H2_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3841,9 +4364,22 @@ setup_trojan_h2_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${H2_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_H2_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"trojan\",
   \"tag\": \"trojan-h2-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3856,6 +4392,7 @@ setup_trojan_h2_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3864,29 +4401,45 @@ setup_trojan_h2_tls() {
     fi
 
     PROTO="Trojan-H2-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nH2 Path: ${H2_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_H2_SNI})" || echo "自签证书(${TROJAN_H2_SNI})")\nSNI: ${TROJAN_H2_SNI}"
+    local cert_info="自签证书(${TROJAN_H2_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${TROJAN_H2_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${TROJAN_H2_SNI})"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nH2 Path: ${H2_PATH}\n证书: ${cert_info}\nSNI: ${TROJAN_H2_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${TROJAN_H2_SNI}" "443" "${PORT}" "${H2_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${TROJAN_H2_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_H2_SNI}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${link_host}:${link_port}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-${link_host}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${TROJAN_H2_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${TROJAN_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
-    # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_H2_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${TROJAN_H2_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${TROJAN_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("trojan-h2-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_H2_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -3928,7 +4481,7 @@ setup_trojan_httpupgrade_tls() {
     fi
 
     # 证书模式选择
-    ask_cert_mode "${TROJAN_HU_SNI}"
+    ask_cert_mode "${TROJAN_HU_SNI}" "caddy"
     local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
 
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
@@ -3943,7 +4496,16 @@ setup_trojan_httpupgrade_tls() {
     fi
 
     local tls_config=""
-    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+    local listen_addr=$(get_listen_address)
+    local public_port="${PORT}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        # Caddy 模式：sing-box 无 TLS，监听内部端口
+        local internal_port=$(get_random_free_port)
+        listen_addr="127.0.0.1"
+        PORT="${internal_port}"
+        tls_config=""
+        print_info "Caddy 模式: sing-box 监听 127.0.0.1:${internal_port}, Caddy 反代到该端口"
+    elif [[ "${NODE_CERT_MODE}" == "acme" ]]; then
         ACME_DOMAINS+=("${TROJAN_HU_SNI}")
         tls_config="\"tls\": {
     \"enabled\": true,
@@ -3964,9 +4526,22 @@ setup_trojan_httpupgrade_tls() {
 
     print_info "生成配置文件..."
 
-    local listen_addr=$(get_listen_address)
-
-    local inbound="{
+    local inbound=""
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${HU_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_HU_SNI}\"}
+  }
+}"
+    else
+        inbound="{
   \"type\": \"trojan\",
   \"tag\": \"trojan-hu-${PORT}\",
   \"listen\": \"${listen_addr}\",
@@ -3979,6 +4554,7 @@ setup_trojan_httpupgrade_tls() {
   },
   ${tls_config}
 }"
+    fi
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
@@ -3987,29 +4563,45 @@ setup_trojan_httpupgrade_tls() {
     fi
 
     PROTO="Trojan-HTTPUpgrade-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nPath: ${HU_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_HU_SNI})" || echo "自签证书(${TROJAN_HU_SNI})")\nSNI: ${TROJAN_HU_SNI}"
+    local cert_info="自签证书(${TROJAN_HU_SNI})"
+    [[ "${NODE_CERT_MODE}" == "acme" ]] && cert_info="ACME/Let's Encrypt(${TROJAN_HU_SNI})"
+    [[ "${NODE_CERT_MODE}" == "caddy" ]] && cert_info="Caddy反代(${TROJAN_HU_SNI})"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nPath: ${HU_PATH}\n证书: ${cert_info}\nSNI: ${TROJAN_HU_SNI}"
 
     CURRENT_NEW_LINKS=""
+
+    # Caddy 反代配置
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        add_caddy_site "${TROJAN_HU_SNI}" "443" "${PORT}" "${HU_PATH}"
+    fi
+
+    # 链接生成
+    local link_host="${SERVER_IP}"
+    local link_port="${public_port}"
+    if [[ "${NODE_CERT_MODE}" == "caddy" ]]; then
+        link_host="${TROJAN_HU_SNI}"
+        link_port="443"
+    fi
 
     local allow_insecure=""
     [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
-    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_HU_SNI}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${link_host}:${link_port}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-${link_host}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${link_host}" "${link_port}" "${TROJAN_HU_SNI}"
     LINK="$link_ipv4"
 
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${link_host}:${link_port} (SNI: ${TROJAN_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
 
-    # IPv6 链接
-    if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_HU_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    # IPv6 链接（如果有，Caddy 模式下不生成 IPv6 链接）
+    if [[ -n "${SERVER_IPV6}" && "${NODE_CERT_MODE}" != "caddy" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${link_port}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${link_port}" "${TROJAN_HU_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${link_port} (SNI: ${TROJAN_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
 
     INBOUND_TAGS+=("trojan-hu-${PORT}")
-    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PORTS+=("${public_port}")
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_HU_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
@@ -7396,6 +7988,11 @@ start_svc() {
             journalctl -u sing-box -n 10 --no-pager
         fi
         exit 1
+    fi
+    
+    # 如果有 Caddy 节点，重载 Caddy 配置
+    if command -v caddy &>/dev/null && [[ -d "${CADDY_SITE_DIR}" ]] && ls "${CADDY_SITE_DIR}"/*.conf &>/dev/null 2>&1; then
+        reload_caddy
     fi
 }
 # ==================== 结果显示 ====================
