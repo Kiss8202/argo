@@ -7486,7 +7486,13 @@ delete_single_node() {
     echo -e "${CYAN}当前节点列表:${NC}"
     for i in "${!INBOUND_TAGS[@]}"; do
         idx=$((i+1))
-        echo -e "  ${GREEN}[${idx}]${NC} 协议: ${INBOUND_PROTOS[$i]}, 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        local cert_mode="${INBOUND_CERT_MODES[$i]:-selfsign}"
+        local cert_info=""
+        case "$cert_mode" in
+            caddy) cert_info=" ${CYAN}[Caddy]${NC}" ;;
+            acme) cert_info=" ${GREEN}[ACME]${NC}" ;;
+        esac
+        echo -e "  ${GREEN}[${idx}]${NC} 协议: ${INBOUND_PROTOS[$i]}, 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}${cert_info}"
     done
     echo ""
     echo -e "${RED}警告: 删除节点后无法恢复！${NC}"
@@ -7528,6 +7534,25 @@ delete_single_node() {
     if [[ -f "${CONFIG_FILE}" ]] && command -v jq &>/dev/null; then
         print_info "从配置文件删除节点..."
         
+        # 如果是 Caddy 节点，清理 Caddy 站点配置
+        local cert_mode="${INBOUND_CERT_MODES[$index]:-selfsign}"
+        if [[ "$cert_mode" == "caddy" ]]; then
+            print_info "清理 Caddy 站点配置..."
+            local caddy_site_file="${CADDY_SITE_DIR}/${sni}.conf"
+            if [[ -f "$caddy_site_file" ]]; then
+                # 删除该节点对应的 handle 块或整个站点文件
+                local internal_port=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .listen_port" "${CONFIG_FILE}" 2>/dev/null)
+                # 检查站点文件中是否还有其他节点的反向代理
+                local other_proxies=$(grep -c "reverse_proxy" "$caddy_site_file" 2>/dev/null || echo "0")
+                if [[ "$other_proxies" -le 1 ]]; then
+                    rm -f "$caddy_site_file"
+                else
+                    # 只删除该节点的反向代理行
+                    sed -i "/reverse_proxy.*127\.0\.0\.1:${internal_port}/d" "$caddy_site_file" 2>/dev/null
+                fi
+            fi
+        fi
+        
         # 使用 jq 过滤掉要删除的节点
         local temp_config=$(mktemp)
         
@@ -7547,6 +7572,7 @@ delete_single_node() {
         unset INBOUND_PROTOS[$index]
         unset INBOUND_SNIS[$index]
         unset INBOUND_RELAY_TAGS[$index]
+        unset INBOUND_CERT_MODES[$index]
         
         # 重建数组（移除空元素）
         INBOUND_TAGS=("${INBOUND_TAGS[@]}")
@@ -7554,6 +7580,7 @@ delete_single_node() {
         INBOUND_PROTOS=("${INBOUND_PROTOS[@]}")
         INBOUND_SNIS=("${INBOUND_SNIS[@]}")
         INBOUND_RELAY_TAGS=("${INBOUND_RELAY_TAGS[@]}")
+        INBOUND_CERT_MODES=("${INBOUND_CERT_MODES[@]}")
         
         # 重新加载配置
         load_inbounds_from_config
@@ -7608,6 +7635,15 @@ delete_all_nodes() {
     INBOUND_PROTOS=()
     INBOUND_SNIS=()
     INBOUND_RELAY_TAGS=()
+    INBOUND_CERT_MODES=()
+    ACME_DOMAINS=()
+    CADDY_MAPPINGS=()
+    
+    # 清理 Caddy 站点配置
+    if [[ -d "${CADDY_SITE_DIR}" ]]; then
+        rm -f "${CADDY_SITE_DIR}"/*.conf 2>/dev/null
+        print_info "已清理 Caddy 站点配置"
+    fi
     
     # 根据出站模式设置 DNS 策略
     local dns_strategy="prefer_ipv4"
@@ -8230,37 +8266,60 @@ show_main_menu() {
     fi
     
     # 统计各协议节点数
-    local reality_count=0
+    local vless_count=0
+    local vmess_count=0
+    local trojan_count=0
     local hysteria2_count=0
+    local tuic_count=0
     local socks5_count=0
     local shadowtls_count=0
-    local https_count=0
     local anytls_count=0
+    local ss_count=0
+    local caddy_count=0
+    local acme_count=0
     
-    for proto in "${INBOUND_PROTOS[@]}"; do
+    for i in "${!INBOUND_PROTOS[@]}"; do
+        local proto="${INBOUND_PROTOS[$i]}"
+        local cert_mode="${INBOUND_CERT_MODES[$i]:-selfsign}"
         case "$proto" in
-            "Reality") ((reality_count++)) ;;
-            "Hysteria2") ((hysteria2_count++)) ;;
-            "SOCKS5") ((socks5_count++)) ;;
-            "ShadowTLS v3") ((shadowtls_count++)) ;;
-            "HTTPS") ((https_count++)) ;;
-            "AnyTLS") ((anytls_count++)) ;;
+            VLESS-*) ((vless_count++)) ;;
+            VMess-*) ((vmess_count++)) ;;
+            Trojan-*) ((trojan_count++)) ;;
+            Hysteria2) ((hysteria2_count++)) ;;
+            TUIC) ((tuic_count++)) ;;
+            SOCKS5) ((socks5_count++)) ;;
+            ShadowTLS*) ((shadowtls_count++)) ;;
+            AnyTLS*) ((anytls_count++)) ;;
+            Shadowsocks) ((ss_count++)) ;;
         esac
+        [[ "$cert_mode" == "caddy" ]] && ((caddy_count++))
+        [[ "$cert_mode" == "acme" ]] && ((acme_count++))
     done
     
     echo -e "  ${YELLOW}当前节点数: ${GREEN}${#INBOUND_TAGS[@]}${NC}"
     
     if [[ ${#INBOUND_TAGS[@]} -gt 0 ]]; then
         local node_details=""
-        [[ $reality_count -gt 0 ]] && node_details="${node_details}Reality:${reality_count} "
+        [[ $vless_count -gt 0 ]] && node_details="${node_details}VLESS:${vless_count} "
+        [[ $vmess_count -gt 0 ]] && node_details="${node_details}VMess:${vmess_count} "
+        [[ $trojan_count -gt 0 ]] && node_details="${node_details}Trojan:${trojan_count} "
         [[ $hysteria2_count -gt 0 ]] && node_details="${node_details}Hysteria2:${hysteria2_count} "
+        [[ $tuic_count -gt 0 ]] && node_details="${node_details}TUIC:${tuic_count} "
         [[ $socks5_count -gt 0 ]] && node_details="${node_details}SOCKS5:${socks5_count} "
         [[ $shadowtls_count -gt 0 ]] && node_details="${node_details}ShadowTLS:${shadowtls_count} "
-        [[ $https_count -gt 0 ]] && node_details="${node_details}HTTPS:${https_count} "
         [[ $anytls_count -gt 0 ]] && node_details="${node_details}AnyTLS:${anytls_count} "
+        [[ $ss_count -gt 0 ]] && node_details="${node_details}SS:${ss_count} "
         
         if [[ -n "$node_details" ]]; then
             echo -e "  ${CYAN}  └─ ${node_details}${NC}"
+        fi
+        
+        # 显示证书模式统计
+        local cert_details=""
+        [[ $caddy_count -gt 0 ]] && cert_details="${cert_details}${CYAN}Caddy:${caddy_count}${NC} "
+        [[ $acme_count -gt 0 ]] && cert_details="${cert_details}${GREEN}ACME:${acme_count}${NC} "
+        if [[ -n "$cert_details" ]]; then
+            echo -e "  ${CYAN}  └─ 证书: ${cert_details}${NC}"
         fi
     fi
     echo ""
@@ -8460,10 +8519,17 @@ config_and_view_menu() {
                             local proto="${INBOUND_PROTOS[$idx]}"
                             local port="${INBOUND_PORTS[$idx]}"
                             local sni="${INBOUND_SNIS[$idx]}"
+                            local cert_mode="${INBOUND_CERT_MODES[$idx]:-selfsign}"
 
                             # 节点摘要行
                             local summary="  ${YELLOW}[${proto}]${NC} 端口:${port}"
                             [[ -n "$sni" ]] && summary+=" SNI:${sni}"
+                            # 显示证书模式
+                            case "$cert_mode" in
+                                caddy) summary+=" ${CYAN}[Caddy]${NC}" ;;
+                                acme) summary+=" ${GREEN}[ACME]${NC}" ;;
+                                *) ;; # selfsign 不显示
+                            esac
                             echo -e "${summary}"
 
                             # 从映射中查找链接
@@ -8528,6 +8594,13 @@ delete_self() {
     svc_stop
     svc_disable
     
+    # 停止并清理 Caddy
+    if command -v caddy &>/dev/null; then
+        print_info "停止 Caddy 服务..."
+        stop_caddy
+        systemctl disable caddy 2>/dev/null || true
+    fi
+    
     if [[ $ALPINE -eq 1 ]]; then
         if [[ -f /etc/init.d/sing-box ]]; then
             print_info "删除 OpenRC 服务..."
@@ -8565,6 +8638,15 @@ delete_self() {
     if [[ -d ${CERT_DIR} ]]; then
         print_info "删除证书目录: ${CERT_DIR}"
         rm -rf "${CERT_DIR}" 2>/dev/null
+    fi
+    
+    # 清理 Caddy 站点配置
+    if [[ -d "${CADDY_SITE_DIR}" ]]; then
+        print_info "删除 Caddy 站点配置..."
+        rm -rf "${CADDY_SITE_DIR}" 2>/dev/null
+    fi
+    if [[ -f "${CADDY_DIR}/Caddyfile" ]]; then
+        rm -f "${CADDY_DIR}/Caddyfile" 2>/dev/null
     fi
     
     if [[ -d "${LINK_DIR}" ]]; then
