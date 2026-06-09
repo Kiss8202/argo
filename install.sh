@@ -1560,9 +1560,9 @@ setup_vless_reality() {
     read -p "Flow [${NODE_FLOW}]: " INPUT_FLOW
     NODE_FLOW=${INPUT_FLOW:-${NODE_FLOW}}
     
-    # Short ID（自动随机）
-    local NODE_SHORT_ID=$(openssl rand -hex 8)
-    print_info "Short ID: ${NODE_SHORT_ID}"
+    # Short ID（233boy 格式：空字符串）
+    local NODE_SHORT_ID=""
+    print_info "Short ID: (空)"
     
     print_info "生成配置文件..."
     
@@ -1580,7 +1580,7 @@ setup_vless_reality() {
       \"enabled\": true,
       \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
       \"private_key\": \"${REALITY_PRIVATE}\",
-      \"short_id\": [\"${NODE_SHORT_ID}\"]
+      \"short_id\": [\"\"]
     }
   }
 }"
@@ -1593,12 +1593,12 @@ setup_vless_reality() {
     
     # 生成链接
     PROTO="VLESS-REALITY"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${NODE_SHORT_ID}\nSNI: ${NODE_SNI}\nFlow: ${NODE_FLOW}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nSNI: ${NODE_SNI}\nFlow: ${NODE_FLOW}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=tcp#VLESS-REALITY-${SERVER_IP}"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&type=tcp#VLESS-REALITY-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-REALITY" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -1606,7 +1606,7 @@ setup_vless_reality() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=tcp#VLESS-REALITY-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&type=tcp#VLESS-REALITY-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-REALITY" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-REALITY] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -1693,8 +1693,17 @@ setup_hysteria2() {
     # 保存新添加节点的链接（只用于显示）
     CURRENT_NEW_LINKS=""
     
+    # 计算证书指纹（pinSHA256）
+    local cert_pin=""
+    if [[ -f "${CERT_DIR}/${HY2_SNI}/cert.pem" ]]; then
+        cert_pin=$(openssl x509 -in "${CERT_DIR}/${HY2_SNI}/cert.pem" -outform DER 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | base64 -w0)
+    fi
+
     # IPv4 链接
-    local link_ipv4="hysteria2://${NODE_HY2_PASSWORD}@${SERVER_IP}:${PORT}?insecure=1&sni=${HY2_SNI}"
+    local link_ipv4="hysteria2://${NODE_HY2_PASSWORD}@${SERVER_IP}:${PORT}?alpn=h3&insecure=1&allowInsecure=1&sni=${HY2_SNI}"
+    if [[ -n "$cert_pin" ]]; then
+        link_ipv4="${link_ipv4}&pinSHA256=${cert_pin}"
+    fi
     if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
         link_ipv4="${link_ipv4}&obfs=salamander&obfs-password=${OBFS_PASSWORD}"
     fi
@@ -1707,7 +1716,10 @@ setup_hysteria2() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="hysteria2://${NODE_HY2_PASSWORD}@[${SERVER_IPV6}]:${PORT}?insecure=1&sni=${HY2_SNI}"
+        local link_ipv6="hysteria2://${NODE_HY2_PASSWORD}@[${SERVER_IPV6}]:${PORT}?alpn=h3&insecure=1&allowInsecure=1&sni=${HY2_SNI}"
+        if [[ -n "$cert_pin" ]]; then
+            link_ipv6="${link_ipv6}&pinSHA256=${cert_pin}"
+        fi
         if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
             link_ipv6="${link_ipv6}&obfs=salamander&obfs-password=${OBFS_PASSWORD}"
         fi
@@ -2121,7 +2133,9 @@ setup_vless_ws_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
   \"transport\": {
     \"type\": \"ws\",
-    \"path\": \"${NODE_PATH}\"
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
   \"tls\": {
     \"enabled\": true,
@@ -2143,7 +2157,7 @@ setup_vless_ws_tls() {
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-${SERVER_IP}"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-WS-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2151,7 +2165,7 @@ setup_vless_ws_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-WS-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2229,7 +2243,8 @@ setup_vless_h2_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
   \"transport\": {
     \"type\": \"http\",
-    \"path\": \"${NODE_PATH}\"
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -2238,20 +2253,20 @@ setup_vless_h2_tls() {
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
   }
 }"
-    
+
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
     else
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
-    
+
     PROTO="VLESS-H2-TLS"
     EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=http&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-${SERVER_IP}"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-H2-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2259,7 +2274,7 @@ setup_vless_h2_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=http&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-H2-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2337,7 +2352,8 @@ setup_vless_httpupgrade_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
   \"transport\": {
     \"type\": \"httpupgrade\",
-    \"path\": \"${NODE_PATH}\"
+    \"path\": \"${NODE_PATH}\",
+    \"headers\": {\"host\": \"${NODE_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -2346,20 +2362,20 @@ setup_vless_httpupgrade_tls() {
     \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
   }
 }"
-    
+
     if [[ -z "$INBOUNDS_JSON" ]]; then
         INBOUNDS_JSON="$inbound"
     else
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
-    
+
     PROTO="VLESS-HTTPUpgrade-TLS"
     EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2367,7 +2383,7 @@ setup_vless_httpupgrade_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2418,9 +2434,9 @@ setup_vless_http2_reality() {
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
     
-    # Short ID（自动随机）
-    local NODE_SHORT_ID=$(openssl rand -hex 8)
-    print_info "Short ID: ${NODE_SHORT_ID}"
+    # Short ID（233boy 格式：空字符串）
+    local NODE_SHORT_ID=""
+    print_info "Short ID: (空)"
     
     print_info "生成配置文件..."
     
@@ -2442,7 +2458,7 @@ setup_vless_http2_reality() {
       \"enabled\": true,
       \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
       \"private_key\": \"${REALITY_PRIVATE}\",
-      \"short_id\": [\"${NODE_SHORT_ID}\"]
+      \"short_id\": [\"\"]
     }
   }
 }"
@@ -2454,12 +2470,12 @@ setup_vless_http2_reality() {
     fi
     
     PROTO="VLESS-H2-REALITY"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${NODE_SHORT_ID}\nSNI: ${NODE_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nSNI: ${NODE_SNI}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=http&allowInsecure=1#VLESS-H2-REALITY-${SERVER_IP}"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&type=h2#VLESS-H2-REALITY-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-H2-REALITY" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2467,7 +2483,7 @@ setup_vless_http2_reality() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=http&allowInsecure=1#VLESS-H2-REALITY-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&type=h2#VLESS-H2-REALITY-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-H2-REALITY" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-REALITY] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2733,7 +2749,7 @@ setup_vmess_tcp() {
   \"transport\": {
     \"type\": \"http\",
     \"path\": \"${HTTP_PATH}\",
-    \"headers\": {\"Host\": \"${HTTP_HOST}\"}
+    \"headers\": {\"host\": \"${HTTP_HOST}\"}
   }"
     fi
 
@@ -2848,7 +2864,7 @@ setup_vmess_http() {
   \"transport\": {
     \"type\": \"http\",
     \"path\": \"${HTTP_PATH}\",
-    \"headers\": {\"Host\": \"${HTTP_HOST}\"}
+    \"headers\": {\"host\": \"${HTTP_HOST}\"}
   }
 }"
 
@@ -3038,7 +3054,9 @@ setup_vmess_ws_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
   \"transport\": {
     \"type\": \"ws\",
-    \"path\": \"${WS_PATH}\"
+    \"path\": \"${WS_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_WS_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
   \"tls\": {
     \"enabled\": true,
@@ -3060,7 +3078,7 @@ setup_vmess_ws_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_WS_SNI}"
     LINK="$link_ipv4"
@@ -3069,7 +3087,7 @@ setup_vmess_ws_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_WS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3143,7 +3161,8 @@ setup_vmess_h2_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
   \"transport\": {
     \"type\": \"http\",
-    \"path\": \"${H2_PATH}\"
+    \"path\": \"${H2_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_H2_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -3165,7 +3184,7 @@ setup_vmess_h2_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_H2_SNI}"
     LINK="$link_ipv4"
@@ -3174,7 +3193,7 @@ setup_vmess_h2_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_H2_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3248,7 +3267,8 @@ setup_vmess_httpupgrade_tls() {
   \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
   \"transport\": {
     \"type\": \"httpupgrade\",
-    \"path\": \"${HU_PATH}\"
+    \"path\": \"${HU_PATH}\",
+    \"headers\": {\"host\": \"${VMESS_HU_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -3270,7 +3290,7 @@ setup_vmess_httpupgrade_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_HU_SNI}"
     LINK="$link_ipv4"
@@ -3279,7 +3299,7 @@ setup_vmess_httpupgrade_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_HU_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3363,7 +3383,7 @@ setup_trojan_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_TLS_SNI}&allowInsecure=1#Trojan-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}&insecure=1&allowInsecure=1#Trojan-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_TLS_SNI}"
     LINK="$link_ipv4"
 
@@ -3371,7 +3391,7 @@ setup_trojan_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_TLS_SNI}&allowInsecure=1#Trojan-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}&insecure=1&allowInsecure=1#Trojan-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_TLS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_TLS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3444,7 +3464,9 @@ setup_trojan_ws_tls() {
   \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
   \"transport\": {
     \"type\": \"ws\",
-    \"path\": \"${WS_PATH}\"
+    \"path\": \"${WS_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_WS_SNI}\"},
+    \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
   \"tls\": {
     \"enabled\": true,
@@ -3466,7 +3488,7 @@ setup_trojan_ws_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_WS_SNI}&type=ws&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_WS_SNI}"
     LINK="$link_ipv4"
 
@@ -3474,7 +3496,7 @@ setup_trojan_ws_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_WS_SNI}&type=ws&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_WS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3547,7 +3569,8 @@ setup_trojan_h2_tls() {
   \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
   \"transport\": {
     \"type\": \"http\",
-    \"path\": \"${H2_PATH}\"
+    \"path\": \"${H2_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_H2_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -3569,7 +3592,7 @@ setup_trojan_h2_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_H2_SNI}&type=http&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_H2_SNI}"
     LINK="$link_ipv4"
 
@@ -3577,7 +3600,7 @@ setup_trojan_h2_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_H2_SNI}&type=http&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_H2_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3650,7 +3673,8 @@ setup_trojan_httpupgrade_tls() {
   \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
   \"transport\": {
     \"type\": \"httpupgrade\",
-    \"path\": \"${HU_PATH}\"
+    \"path\": \"${HU_PATH}\",
+    \"headers\": {\"host\": \"${TROJAN_HU_SNI}\"}
   },
   \"tls\": {
     \"enabled\": true,
@@ -3672,7 +3696,7 @@ setup_trojan_httpupgrade_tls() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_HU_SNI}&type=httpupgrade&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_HU_SNI}"
     LINK="$link_ipv4"
 
@@ -3680,7 +3704,7 @@ setup_trojan_httpupgrade_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_HU_SNI}&type=httpupgrade&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_HU_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3734,16 +3758,16 @@ setup_tuic() {
 
     # 拥塞控制
     echo -e "${YELLOW}请选择拥塞控制算法${NC}"
-    echo -e "${CYAN}1) cubic (默认)${NC}"
-    echo -e "${CYAN}2) new_reno${NC}"
-    echo -e "${CYAN}3) bbr${NC}"
-    read -p "拥塞控制 [cubic]: " CONGESTION
-    CONGESTION=${CONGESTION:-cubic}
+    echo -e "${CYAN}1) bbr (默认)${NC}"
+    echo -e "${CYAN}2) cubic${NC}"
+    echo -e "${CYAN}3) new_reno${NC}"
+    read -p "拥塞控制 [bbr]: " CONGESTION
+    CONGESTION=${CONGESTION:-bbr}
     case "$CONGESTION" in
-        1|cubic) CONGESTION="cubic" ;;
-        2|new_reno) CONGESTION="new_reno" ;;
-        3|bbr) CONGESTION="bbr" ;;
-        *) CONGESTION="cubic" ;;
+        1|bbr) CONGESTION="bbr" ;;
+        2|cubic) CONGESTION="cubic" ;;
+        3|new_reno) CONGESTION="new_reno" ;;
+        *) CONGESTION="bbr" ;;
     esac
     print_info "拥塞控制: ${CONGESTION}"
 
@@ -3797,7 +3821,7 @@ setup_tuic() {
     CURRENT_NEW_LINKS=""
 
     # IPv4 链接
-    local link_ipv4="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@${SERVER_IP}:${PORT}?sni=${TUIC_SNI}&congestion_control=${CONGESTION}&allowInsecure=1#TUIC-${SERVER_IP}"
+    local link_ipv4="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@${SERVER_IP}:${PORT}?sni=${TUIC_SNI}&alpn=h3&insecure=1&allowInsecure=1&congestion_control=${CONGESTION}#TUIC-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TUIC_SNI}"
     LINK="$link_ipv4"
 
@@ -3805,7 +3829,7 @@ setup_tuic() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@[${SERVER_IPV6}]:${PORT}?sni=${TUIC_SNI}&congestion_control=${CONGESTION}&allowInsecure=1#TUIC-[${SERVER_IPV6}]"
+        local link_ipv6="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@[${SERVER_IPV6}]:${PORT}?sni=${TUIC_SNI}&alpn=h3&insecure=1&allowInsecure=1&congestion_control=${CONGESTION}#TUIC-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TUIC_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TUIC_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
