@@ -819,7 +819,7 @@ regenerate_links_from_config() {
                         cat > "${client_config_file_ipv4}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -881,7 +881,7 @@ EOFCLIENT
                             cat > "${client_config_file_ipv6}" << EOFCLIENT
 {
   "log": {"level": "info"},
-  "dns": {"servers": [{"tag": "google", "address": "8.8.8.8"}]},
+  "dns": {"servers": [{"tag": "google", "type": "udp", "server": "8.8.8.8"}]},
   "inbounds": [
     {
       "type": "mixed",
@@ -1563,7 +1563,8 @@ setup_shadowtls() {
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -1651,7 +1652,8 @@ EOFCLIENT
     "servers": [
       {
         "tag": "google",
-        "address": "8.8.8.8"
+        "type": "udp",
+        "server": "8.8.8.8"
       }
     ]
   },
@@ -2822,8 +2824,9 @@ delete_all_nodes() {
   "dns": {
     "servers": [
       {
-        "tag": "local",
-        "type": "local"
+        "tag": "dns-direct",
+        "type": "udp",
+        "server": "1.1.1.1"
       },
       {
         "tag": "remote",
@@ -2843,7 +2846,7 @@ delete_all_nodes() {
   ],
   "route": {
     "final": "direct",
-    "default_domain_resolver": "local"
+    "default_domain_resolver": "remote"
   }
 }
 EOFCONFIG
@@ -2895,7 +2898,7 @@ generate_config() {
     done
     
     # 添加 direct outbound
-    local direct_outbound='{"type": "direct", "tag": "direct", "tcp_fast_open": false}'
+    local direct_outbound='{"type": "direct", "tag": "direct"}'
     outbounds_array+=("$direct_outbound")
     
     # 组合 outbounds
@@ -2970,9 +2973,9 @@ generate_config() {
             [[ $i -gt 0 ]] && route_json+=","
             route_json+="${route_rules[$i]}"
         done
-        route_json+="],\"final\":\"direct\",\"default_domain_resolver\":\"local\"}"
+        route_json+="],\"final\":\"direct\",\"default_domain_resolver\":\"remote\"}"
     else
-        route_json="{\"final\":\"direct\",\"default_domain_resolver\":\"local\"}"
+        route_json="{\"final\":\"direct\",\"default_domain_resolver\":\"remote\"}"
     fi
     
     # 构建 DNS 配置（根据出站 IP 模式）
@@ -2981,8 +2984,9 @@ generate_config() {
         dns_json='{
     "servers": [
       {
-        "tag": "local",
-        "type": "local"
+        "tag": "dns-direct",
+        "type": "udp",
+        "server": "1.1.1.1"
       },
       {
         "tag": "remote",
@@ -2997,8 +3001,9 @@ generate_config() {
         dns_json='{
     "servers": [
       {
-        "tag": "local",
-        "type": "local"
+        "tag": "dns-direct",
+        "type": "udp",
+        "server": "1.1.1.1"
       },
       {
         "tag": "remote",
@@ -3013,8 +3018,9 @@ generate_config() {
         dns_json='{
     "servers": [
       {
-        "tag": "local",
-        "type": "local"
+        "tag": "dns-direct",
+        "type": "udp",
+        "server": "1.1.1.1"
       },
       {
         "tag": "remote",
@@ -3043,6 +3049,74 @@ EOFCONFIG
     print_success "配置文件生成完成"
 }
 
+# ==================== 防火墙自动放行 ====================
+open_firewall_ports() {
+    local ports=("$@")
+    if [[ ${#ports[@]} -eq 0 ]]; then
+        return 0
+    fi
+    
+    # 去重
+    local unique_ports=()
+    declare -A seen_ports
+    for p in "${ports[@]}"; do
+        [[ -n "${seen_ports[$p]}" ]] && continue
+        seen_ports[$p]=1
+        unique_ports+=("$p")
+    done
+    
+    # iptables
+    if command -v iptables &>/dev/null; then
+        for p in "${unique_ports[@]}"; do
+            # TCP
+            if ! iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null; then
+                iptables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null
+            fi
+            # UDP
+            if ! iptables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null; then
+                iptables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null
+            fi
+        done
+        # 保存规则（如果可用）
+        if command -v iptables-save &>/dev/null; then
+            iptables-save > /etc/iptables.rules 2>/dev/null
+        fi
+    fi
+    
+    # ip6tables
+    if command -v ip6tables &>/dev/null; then
+        for p in "${unique_ports[@]}"; do
+            if ! ip6tables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null; then
+                ip6tables -I INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null
+            fi
+            if ! ip6tables -C INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null; then
+                ip6tables -I INPUT -p udp --dport "$p" -j ACCEPT 2>/dev/null
+            fi
+        done
+        if command -v ip6tables-save &>/dev/null; then
+            ip6tables-save > /etc/ip6tables.rules 2>/dev/null
+        fi
+    fi
+    
+    # ufw
+    if command -v ufw &>/dev/null; then
+        for p in "${unique_ports[@]}"; do
+            ufw allow "$p" 2>/dev/null
+        done
+    fi
+    
+    # firewalld
+    if command -v firewall-cmd &>/dev/null; then
+        for p in "${unique_ports[@]}"; do
+            firewall-cmd --add-port="$p"/tcp --permanent 2>/dev/null
+            firewall-cmd --add-port="$p"/udp --permanent 2>/dev/null
+        done
+        firewall-cmd --reload 2>/dev/null
+    fi
+    
+    print_success "防火墙已放行端口: ${unique_ports[*]}"
+}
+
 start_svc() {
     print_info "验证配置文件..."
     
@@ -3066,6 +3140,12 @@ start_svc() {
         echo ""
     else
         print_success "配置验证通过"
+    fi
+    
+    # 自动放行防火墙端口
+    if [[ ${#INBOUND_PORTS[@]} -gt 0 ]]; then
+        print_info "放行防火墙端口..."
+        open_firewall_ports "${INBOUND_PORTS[@]}"
     fi
     
     print_info "启动 sing-box 服务..."
