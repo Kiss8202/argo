@@ -541,9 +541,59 @@ load_inbounds_from_config() {
         local proto="unknown"
         local sni=""
         
-        if [[ "$tag" == *"vless-in-"* ]]; then
-            proto="Reality"
+        if [[ "$tag" == *"vless-r-"* ]]; then
+            proto="VLESS-REALITY"
             sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-ws-"* ]]; then
+            proto="VLESS-WS-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-h2r-"* ]]; then
+            proto="VLESS-H2-REALITY"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-h2-"* ]]; then
+            proto="VLESS-H2-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-hu-"* ]]; then
+            proto="VLESS-HTTPUpgrade-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-in-"* ]]; then
+            proto="VLESS-REALITY"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vless-tls-in-"* ]]; then
+            proto="VLESS-WS-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vmess-tcp-"* ]]; then
+            proto="VMess-TCP"
+        elif [[ "$tag" == *"vmess-http-"* ]]; then
+            proto="VMess-HTTP"
+        elif [[ "$tag" == *"vmess-quic-"* ]]; then
+            proto="VMess-QUIC"
+        elif [[ "$tag" == *"vmess-ws-"* ]]; then
+            proto="VMess-WS-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vmess-h2-"* ]]; then
+            proto="VMess-H2-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"vmess-hu-"* ]]; then
+            proto="VMess-HTTPUpgrade-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"trojan-tls-"* ]]; then
+            proto="Trojan-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"trojan-ws-"* ]]; then
+            proto="Trojan-WS-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"trojan-h2-"* ]]; then
+            proto="Trojan-H2-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"trojan-hu-"* ]]; then
+            proto="Trojan-HTTPUpgrade-TLS"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"tuic-"* ]]; then
+            proto="TUIC"
+            sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+        elif [[ "$tag" == *"ss-"* ]]; then
+            proto="Shadowsocks"
         elif [[ "$tag" == *"hy2-in-"* ]]; then
             proto="Hysteria2"
             sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
@@ -552,8 +602,8 @@ load_inbounds_from_config() {
             sni=$(echo "$inbound" | jq -r '.handshake.server // ""' 2>/dev/null)
         elif [[ "$tag" == *"socks-in"* ]]; then
             proto="SOCKS5"
-        elif [[ "$tag" == *"vless-tls-in-"* ]]; then
-            proto="HTTPS"
+        elif [[ "$tag" == *"anytls-reality-"* ]]; then
+            proto="AnyTLS+REALITY"
             sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
         elif [[ "$tag" == *"anytls-in-"* ]]; then
             proto="AnyTLS"
@@ -622,6 +672,10 @@ regenerate_links_from_config() {
     SHADOWTLS_LINKS=""
     HTTPS_LINKS=""
     ANYTLS_LINKS=""
+    VMESS_LINKS=""
+    TROJAN_LINKS=""
+    TUIC_LINKS=""
+    SHADOWSOCKS_LINKS=""
     
     # 加载密钥文件（安全读取，避免代码注入）
     if [[ -f "${KEY_FILE}" ]]; then
@@ -679,46 +733,228 @@ regenerate_links_from_config() {
                 local tls_enabled=$(echo "$inbound" | jq -r '.tls.enabled // false' 2>/dev/null)
                 if [[ "$tls_enabled" == "true" ]]; then
                     local reality_enabled=$(echo "$inbound" | jq -r '.tls.reality.enabled // false' 2>/dev/null)
+                    local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                    local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                    [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                    
+                    # 检查是否有 transport
+                    local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
+                    
                     if [[ "$reality_enabled" == "true" ]]; then
-                        # Reality
-                        local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
-                        local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                        # REALITY variants
                         local pbk=$(echo "$inbound" | jq -r '.tls.reality.public_key // ""' 2>/dev/null)
                         local sid=$(echo "$inbound" | jq -r '.tls.reality.short_id[0] // ""' 2>/dev/null)
                         
                         [[ -z "$pbk" && -n "${REALITY_PUBLIC}" ]] && pbk="${REALITY_PUBLIC}"
                         [[ -z "$sid" && -n "${SHORT_ID}" ]] && sid="${SHORT_ID}"
-                        [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                         
                         if [[ -n "$uuid" && -n "$pbk" ]]; then
-                            # IPv4 链接
-                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#Reality-${SERVER_IP}"
-                            add_link "$link_ipv4" "Reality" "" "${SERVER_IP}" "${port}" "${sni}"
+                            local proto_label="VLESS-REALITY"
+                            local link_params="encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}"
                             
-                            # IPv6 链接（如果有）
+                            if [[ -n "$transport_type" ]]; then
+                                # VLESS-H2-REALITY
+                                proto_label="VLESS-H2-REALITY"
+                                link_params="encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}"
+                                local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                                case "$transport_type" in
+                                    http) link_params="${link_params}&type=h2&path=${transport_path}" ;;
+                                esac
+                            else
+                                link_params="${link_params}&type=tcp"
+                            fi
+                            
+                            # IPv4
+                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?${link_params}#${proto_label}-${SERVER_IP}"
+                            add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                            
+                            # IPv6
                             if [[ -n "${SERVER_IPV6}" ]]; then
-                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#Reality-[${SERVER_IPV6}]"
-                                add_link "$link_ipv6" "Reality" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?${link_params}#${proto_label}-[${SERVER_IPV6}]"
+                                add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
                             fi
                         fi
                     else
-                        # HTTPS
-                        local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
-                        local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
-                        
-                        [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
-                        
+                        # TLS variants (WS/H2/HTTPUpgrade or plain TLS)
                         if [[ -n "$uuid" ]]; then
-                            # IPv4 链接
-                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?encryption=none&security=tls&sni=${sni}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
-                            add_link "$link_ipv4" "HTTPS" "" "${SERVER_IP}" "${port}" "${sni}"
+                            local proto_label="VLESS-WS-TLS"
+                            local link_params="encryption=none&security=tls&sni=${sni}&allowInsecure=1"
                             
-                            # IPv6 链接（如果有）
+                            if [[ -n "$transport_type" ]]; then
+                                local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                                case "$transport_type" in
+                                    ws)
+                                        proto_label="VLESS-WS-TLS"
+                                        link_params="${link_params}&type=ws&path=${transport_path}"
+                                        ;;
+                                    http)
+                                        proto_label="VLESS-H2-TLS"
+                                        link_params="${link_params}&type=h2&path=${transport_path}"
+                                        ;;
+                                    httpupgrade)
+                                        proto_label="VLESS-HTTPUpgrade-TLS"
+                                        link_params="${link_params}&type=httpupgrade&path=${transport_path}"
+                                        ;;
+                                esac
+                            else
+                                link_params="${link_params}&type=tcp"
+                                proto_label="VLESS-TLS"
+                            fi
+                            
+                            # IPv4
+                            local link_ipv4="vless://${uuid}@${SERVER_IP}:${port}?${link_params}#${proto_label}-${SERVER_IP}"
+                            add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                            
+                            # IPv6
                             if [[ -n "${SERVER_IPV6}" ]]; then
-                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?encryption=none&security=tls&sni=${sni}&type=tcp&allowInsecure=1#HTTPS-[${SERVER_IPV6}]"
-                                add_link "$link_ipv6" "HTTPS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                                local link_ipv6="vless://${uuid}@[${SERVER_IPV6}]:${port}?${link_params}#${proto_label}-[${SERVER_IPV6}]"
+                                add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
                             fi
                         fi
+                    fi
+                fi
+                ;;
+            "vmess")
+                local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
+                local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                local tls_enabled=$(echo "$inbound" | jq -r '.tls.enabled // false' 2>/dev/null)
+                
+                [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                
+                if [[ -n "$uuid" ]]; then
+                    local proto_label="VMess-TCP"
+                    local security="auto"
+                    local type_param="tcp"
+                    local path_param=""
+                    local host_param=""
+                    
+                    if [[ "$tls_enabled" == "true" ]]; then
+                        security="tls"
+                    fi
+                    
+                    case "$transport_type" in
+                        ws)
+                            proto_label="VMess-WS-TLS"
+                            type_param="ws"
+                            path_param="$transport_path"
+                            ;;
+                        http)
+                            if [[ "$tls_enabled" == "true" ]]; then
+                                proto_label="VMess-H2-TLS"
+                            else
+                                proto_label="VMess-HTTP"
+                            fi
+                            type_param="h2"
+                            path_param="$transport_path"
+                            ;;
+                        httpupgrade)
+                            proto_label="VMess-HTTPUpgrade-TLS"
+                            type_param="httpupgrade"
+                            path_param="$transport_path"
+                            ;;
+                        quic)
+                            proto_label="VMess-QUIC"
+                            type_param="quic"
+                            ;;
+                        *)
+                            if [[ "$tls_enabled" != "true" ]]; then
+                                proto_label="VMess-TCP"
+                            fi
+                            ;;
+                    esac
+                    
+                    # Build VMess JSON for base64
+                    local vmess_json="{\"v\":\"2\",\"ps\":\"${proto_label}-${SERVER_IP}\",\"add\":\"${SERVER_IP}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",\"alpn\":\"\"}"
+                    local vmess_base64=$(echo -n "$vmess_json" | base64 -w0)
+                    
+                    # IPv4
+                    local link_ipv4="vmess://${vmess_base64}"
+                    add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                    
+                    # IPv6
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local vmess_json_v6="{\"v\":\"2\",\"ps\":\"${proto_label}-[${SERVER_IPV6}]\",\"add\":\"${SERVER_IPV6}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",\"alpn\":\"\"}"
+                        local vmess_base64_v6=$(echo -n "$vmess_json_v6" | base64 -w0)
+                        local link_ipv6="vmess://${vmess_base64_v6}"
+                        add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                    fi
+                fi
+                ;;
+            "trojan")
+                local password=$(echo "$inbound" | jq -r '.users[0].password // ""' 2>/dev/null)
+                local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                local transport_type=$(echo "$inbound" | jq -r '.transport.type // ""' 2>/dev/null)
+                local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
+                
+                [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                
+                if [[ -n "$password" ]]; then
+                    local proto_label="Trojan-TLS"
+                    local link_params="security=tls&sni=${sni}&type=tcp&allowInsecure=1"
+                    
+                    case "$transport_type" in
+                        ws)
+                            proto_label="Trojan-WS-TLS"
+                            link_params="security=tls&sni=${sni}&type=ws&path=${transport_path}&allowInsecure=1"
+                            ;;
+                        http)
+                            proto_label="Trojan-H2-TLS"
+                            link_params="security=tls&sni=${sni}&type=h2&path=${transport_path}&allowInsecure=1"
+                            ;;
+                        httpupgrade)
+                            proto_label="Trojan-HTTPUpgrade-TLS"
+                            link_params="security=tls&sni=${sni}&type=httpupgrade&path=${transport_path}&allowInsecure=1"
+                            ;;
+                    esac
+                    
+                    # IPv4
+                    local link_ipv4="trojan://${password}@${SERVER_IP}:${port}?${link_params}#${proto_label}-${SERVER_IP}"
+                    add_link "$link_ipv4" "$proto_label" "" "${SERVER_IP}" "${port}" "${sni}"
+                    
+                    # IPv6
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local link_ipv6="trojan://${password}@[${SERVER_IPV6}]:${port}?${link_params}#${proto_label}-[${SERVER_IPV6}]"
+                        add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                    fi
+                fi
+                ;;
+            "tuic")
+                local uuid=$(echo "$inbound" | jq -r '.users[0].uuid // ""' 2>/dev/null)
+                local password=$(echo "$inbound" | jq -r '.users[0].password // ""' 2>/dev/null)
+                local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                local congestion=$(echo "$inbound" | jq -r '.congestion_control // "cubic"' 2>/dev/null)
+                
+                [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
+                
+                if [[ -n "$uuid" && -n "$password" ]]; then
+                    # IPv4
+                    local link_ipv4="tuic://${uuid}:${password}@${SERVER_IP}:${port}?sni=${sni}&congestion_control=${congestion}&allowInsecure=1#TUIC-${SERVER_IP}"
+                    add_link "$link_ipv4" "TUIC" "" "${SERVER_IP}" "${port}" "${sni}"
+                    
+                    # IPv6
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local link_ipv6="tuic://${uuid}:${password}@[${SERVER_IPV6}]:${port}?sni=${sni}&congestion_control=${congestion}&allowInsecure=1#TUIC-[${SERVER_IPV6}]"
+                        add_link "$link_ipv6" "TUIC" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                    fi
+                fi
+                ;;
+            "shadowsocks")
+                local password=$(echo "$inbound" | jq -r '.password // ""' 2>/dev/null)
+                local method=$(echo "$inbound" | jq -r '.method // "2022-blake3-aes-128-gcm"' 2>/dev/null)
+                
+                if [[ -n "$password" ]]; then
+                    local ss_userinfo=$(echo -n "${method}:${password}" | base64 -w0 | sed 's/+/-/g; s/\//_/g; s/=//g')
+                    
+                    # IPv4
+                    local link_ipv4="ss://${ss_userinfo}@${SERVER_IP}:${port}#Shadowsocks-${SERVER_IP}"
+                    add_link "$link_ipv4" "Shadowsocks" "" "${SERVER_IP}" "${port}" ""
+                    
+                    # IPv6
+                    if [[ -n "${SERVER_IPV6}" ]]; then
+                        local link_ipv6="ss://${ss_userinfo}@[${SERVER_IPV6}]:${port}#Shadowsocks-[${SERVER_IPV6}]"
+                        add_link "$link_ipv6" "Shadowsocks" "" "[${SERVER_IPV6}]" "${port}" ""
                     fi
                 fi
                 ;;
@@ -926,18 +1162,38 @@ EOFCLIENT
             "anytls")
                 local password=$(echo "$inbound" | jq -r '.users[0].password // ""' 2>/dev/null)
                 local sni=$(echo "$inbound" | jq -r '.tls.server_name // ""' 2>/dev/null)
+                local reality_enabled=$(echo "$inbound" | jq -r '.tls.reality.enabled // false' 2>/dev/null)
                 
                 [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
                 
                 if [[ -n "$password" ]]; then
-                    # IPv4 链接
-                    local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
-                    add_link "$link_ipv4" "AnyTLS" "" "${SERVER_IP}" "${port}" "${sni}"
-                    
-                    # IPv6 链接（如果有）
-                    if [[ -n "${SERVER_IPV6}" ]]; then
-                        local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
-                        add_link "$link_ipv6" "AnyTLS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                    if [[ "$reality_enabled" == "true" ]]; then
+                        # AnyTLS+REALITY
+                        local pbk=$(echo "$inbound" | jq -r '.tls.reality.public_key // ""' 2>/dev/null)
+                        local sid=$(echo "$inbound" | jq -r '.tls.reality.short_id[0] // ""' 2>/dev/null)
+                        [[ -z "$pbk" && -n "${REALITY_PUBLIC}" ]] && pbk="${REALITY_PUBLIC}"
+                        [[ -z "$sid" && -n "${SHORT_ID}" ]] && sid="${SHORT_ID}"
+                        
+                        # IPv4 链接
+                        local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#AnyTLS+REALITY-${SERVER_IP}"
+                        add_link "$link_ipv4" "AnyTLS+REALITY" "" "${SERVER_IP}" "${port}" "${sni}"
+                        
+                        # IPv6 链接（如果有）
+                        if [[ -n "${SERVER_IPV6}" ]]; then
+                            local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=reality&sni=${sni}&fp=chrome&pbk=${pbk}&sid=${sid}&type=tcp#AnyTLS+REALITY-[${SERVER_IPV6}]"
+                            add_link "$link_ipv6" "AnyTLS+REALITY" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                        fi
+                    else
+                        # AnyTLS (TLS)
+                        # IPv4 链接
+                        local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
+                        add_link "$link_ipv4" "AnyTLS" "" "${SERVER_IP}" "${port}" "${sni}"
+                        
+                        # IPv6 链接（如果有）
+                        if [[ -n "${SERVER_IPV6}" ]]; then
+                            local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
+                            add_link "$link_ipv6" "AnyTLS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
+                        fi
                     fi
                 fi
                 ;;
@@ -967,12 +1223,16 @@ add_link() {
     
     # 添加到对应的协议链接
     case "$proto" in
-        "Reality") REALITY_LINKS="${REALITY_LINKS}${line}" ;;
+        "Reality"|"VLESS-REALITY"|"VLESS-H2-REALITY") REALITY_LINKS="${REALITY_LINKS}${line}" ;;
         "Hysteria2") HYSTERIA2_LINKS="${HYSTERIA2_LINKS}${line}" ;;
         "SOCKS5") SOCKS5_LINKS="${SOCKS5_LINKS}${line}" ;;
         "ShadowTLS v3") SHADOWTLS_LINKS="${SHADOWTLS_LINKS}${line}" ;;
-        "HTTPS") HTTPS_LINKS="${HTTPS_LINKS}${line}" ;;
-        "AnyTLS") ANYTLS_LINKS="${ANYTLS_LINKS}${line}" ;;
+        "HTTPS"|"VLESS-WS-TLS"|"VLESS-H2-TLS"|"VLESS-HTTPUpgrade-TLS"|"VLESS-TLS") HTTPS_LINKS="${HTTPS_LINKS}${line}" ;;
+        "AnyTLS"|"AnyTLS+REALITY") ANYTLS_LINKS="${ANYTLS_LINKS}${line}" ;;
+        VMess-*) VMESS_LINKS="${VMESS_LINKS}${line}" ;;
+        Trojan-*) TROJAN_LINKS="${TROJAN_LINKS}${line}" ;;
+        "TUIC") TUIC_LINKS="${TUIC_LINKS}${line}" ;;
+        "Shadowsocks") SHADOWSOCKS_LINKS="${SHADOWSOCKS_LINKS}${line}" ;;
     esac
 }
 
@@ -1258,39 +1518,92 @@ read_port_with_check() {
         break
     done
 }
-# ==================== Reality 配置 ====================
-setup_reality() {
+# ==================== VLESS-REALITY 配置 ====================
+setup_vless_reality() {
     echo ""
-    read_port_with_check 443
+    # 端口（默认443，Enter=随机）
+    while true; do
+        read -p "监听端口 [Enter=随机, 默认443]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机端口: ${PORT}"
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
     
+    # SNI（默认DEFAULT_SNI，Enter=随机）
     echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
     echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
-    read -p "SNI域名 [${DEFAULT_SNI}]: " SNI
-    SNI=${SNI:-${DEFAULT_SNI}}
+    read -p "SNI域名 [Enter=随机, 默认${DEFAULT_SNI}]: " NODE_SNI
+    if [[ -z "$NODE_SNI" ]]; then
+        NODE_SNI=$(get_random_sni)
+        print_info "随机SNI: ${NODE_SNI}"
+    fi
     
-    # 每个节点使用独立UUID
+    # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
+    
+    # Flow（默认 xtls-rprx-vision）
+    local NODE_FLOW="xtls-rprx-vision"
+    echo -e "${YELLOW}Flow (默认: xtls-rprx-vision，按Enter保持)${NC}"
+    read -p "Flow [${NODE_FLOW}]: " INPUT_FLOW
+    NODE_FLOW=${INPUT_FLOW:-${NODE_FLOW}}
+    
+    # Short ID（自动随机）
+    local NODE_SHORT_ID=$(openssl rand -hex 8)
+    print_info "Short ID: ${NODE_SHORT_ID}"
+    
+    # 是否启用 multiplex
+    local NODE_MULTIPLEX=""
+    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
+    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        local NODE_MUX_PASSWORD=$(openssl rand -hex 16)
+        echo -e "${YELLOW}Multiplex 密码 (Enter=随机)${NC}"
+        read -p "密码 [${NODE_MUX_PASSWORD}]: " INPUT_MUX_PWD
+        NODE_MUX_PASSWORD=${INPUT_MUX_PWD:-${NODE_MUX_PASSWORD}}
+        print_info "Multiplex 密码: ${NODE_MUX_PASSWORD}"
+        NODE_MULTIPLEX=", \"multiplex\": {\"enabled\": true, \"padding\": true}"
+    fi
+    
+    # 是否启用 TLS fragment
+    local TLS_FRAGMENT=""
+    echo -e "${YELLOW}是否启用 TLS Fragment 分片？(y/N)${NC}"
+    read -p "启用 TLS Fragment? [y/N]: " ENABLE_FRAGMENT
+    if [[ "$ENABLE_FRAGMENT" =~ ^[Yy]$ ]]; then
+        TLS_FRAGMENT="1"
+    fi
     
     print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
     local inbound="{
   \"type\": \"vless\",
-  \"tag\": \"vless-in-${PORT}\",
+  \"tag\": \"vless-r-${PORT}\",
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
-  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"flow\": \"xtls-rprx-vision\"}],
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"flow\": \"${NODE_FLOW}\"}],
   \"tls\": {
     \"enabled\": true,
-    \"server_name\": \"${SNI}\",
+    \"server_name\": \"${NODE_SNI}\",
     \"reality\": {
       \"enabled\": true,
-      \"handshake\": {\"server\": \"${SNI}\", \"server_port\": 443},
+      \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
       \"private_key\": \"${REALITY_PRIVATE}\",
-      \"short_id\": [\"${SHORT_ID}\"]
+      \"short_id\": [\"${NODE_SHORT_ID}\"]
     }
-  }
+  }${NODE_MULTIPLEX}
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -1299,35 +1612,33 @@ setup_reality() {
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
     
-    # 生成 Reality 链接 - 同时支持 IPv4 和 IPv6
-    PROTO="Reality"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${SHORT_ID}\nSNI: ${SNI}"
+    # 生成链接
+    PROTO="VLESS-REALITY"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${NODE_SHORT_ID}\nSNI: ${NODE_SNI}\nFlow: ${NODE_FLOW}"
     
-    # 保存新添加节点的链接（只用于显示）
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp#Reality-${SERVER_IP}"
-    add_link "$link_ipv4" "Reality" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${SNI}"
-    LINK="$link_ipv4"  # 默认链接
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=tcp#VLESS-REALITY-${SERVER_IP}"
+    add_link "$link_ipv4" "VLESS-REALITY" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+    LINK="$link_ipv4"
     
-    # 添加到新链接显示
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Reality] ${SERVER_IP}:${PORT} (SNI: ${SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-REALITY] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${SHORT_ID}&type=tcp#Reality-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "Reality" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[Reality] [${SERVER_IPV6}]:${PORT} (SNI: ${SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&flow=${NODE_FLOW}&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=tcp#VLESS-REALITY-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-REALITY" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-REALITY] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
     
-    INBOUND_TAGS+=("vless-in-${PORT}")
+    INBOUND_TAGS+=("vless-r-${PORT}")
     INBOUND_PORTS+=("${PORT}")
     INBOUND_PROTOS+=("${PROTO}")
-    INBOUND_SNIS+=("${SNI}")
+    INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
     
-    print_success "Reality 配置完成 (SNI: ${SNI})"
+    print_success "VLESS-REALITY 配置完成 (SNI: ${NODE_SNI})"
     save_links_to_files
 }
 
@@ -1768,38 +2079,86 @@ EOFCLIENT
     save_links_to_files
 }
 
-# ==================== HTTPS 配置 ====================
-setup_https() {
+# ==================== VLESS-WS-TLS 配置 ====================
+setup_vless_ws_tls() {
     echo ""
-    read_port_with_check 443
+    # 端口（默认443，Enter=随机）
+    while true; do
+        read -p "监听端口 [Enter=随机, 默认443]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机端口: ${PORT}"
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
     
-    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    # SNI（默认DEFAULT_SNI，Enter=随机）
+    echo -e "${YELLOW}请输入SNI域名${NC}"
     echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
-    read -p "SNI域名 [${DEFAULT_SNI}]: " HTTPS_SNI
-    HTTPS_SNI=${HTTPS_SNI:-${DEFAULT_SNI}}
+    read -p "SNI域名 [Enter=随机, 默认${DEFAULT_SNI}]: " NODE_SNI
+    if [[ -z "$NODE_SNI" ]]; then
+        NODE_SNI=$(get_random_sni)
+        print_info "随机SNI: ${NODE_SNI}"
+    fi
     
-    print_info "为 ${HTTPS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${HTTPS_SNI}"
-    
-    # 每个节点使用独立UUID
+    # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
+    
+    # WS path（默认/，Enter=随机8位hex）
+    local NODE_PATH="/"
+    local RANDOM_PATH=$(openssl rand -hex 4)
+    echo -e "${YELLOW}WebSocket 路径 (Enter=随机)${NC}"
+    read -p "路径 [/${RANDOM_PATH}]: " INPUT_PATH
+    if [[ -z "$INPUT_PATH" ]]; then
+        NODE_PATH="/${RANDOM_PATH}"
+    else
+        NODE_PATH="${INPUT_PATH}"
+    fi
+    print_info "WS 路径: ${NODE_PATH}"
+    
+    # 是否启用 multiplex
+    local NODE_MULTIPLEX=""
+    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
+    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        NODE_MULTIPLEX=",
+  \"multiplex\": {\"enabled\": true, \"padding\": true}"
+    fi
+    
+    # 生成自签证书
+    print_info "为 ${NODE_SNI} 生成自签证书..."
+    gen_cert_for_sni "${NODE_SNI}"
     
     print_info "生成配置文件..."
     
     local listen_addr=$(get_listen_address)
     local inbound="{
   \"type\": \"vless\",
-  \"tag\": \"vless-tls-in-${PORT}\",
+  \"tag\": \"vless-ws-${PORT}\",
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${NODE_PATH}\"
+  },
   \"tls\": {
     \"enabled\": true,
-    \"server_name\": \"${HTTPS_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${HTTPS_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${HTTPS_SNI}/private.key\"
-  }
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }${NODE_MULTIPLEX}
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -1808,34 +2167,375 @@ setup_https() {
         INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
     fi
     
-    PROTO="HTTPS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${HTTPS_SNI})\nSNI: ${HTTPS_SNI}"
+    PROTO="VLESS-WS-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\nWS路径: ${NODE_PATH}"
     
-    # 保存新添加节点的链接（只用于显示）
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${HTTPS_SNI}&type=tcp&allowInsecure=1#HTTPS-${SERVER_IP}"
-    add_link "$link_ipv4" "HTTPS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${HTTPS_SNI}"
-    LINK="$link_ipv4"  # 默认链接
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "VLESS-WS-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+    LINK="$link_ipv4"
     
-    # 添加到新链接显示
-    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[HTTPS] ${SERVER_IP}:${PORT} (SNI: ${HTTPS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${HTTPS_SNI}&type=tcp&allowInsecure=1#HTTPS-[${SERVER_IPV6}]"
-        add_link "$link_ipv6" "HTTPS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${HTTPS_SNI}"
-        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[HTTPS] [${SERVER_IPV6}]:${PORT} (SNI: ${HTTPS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-WS-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
     
-    INBOUND_TAGS+=("vless-tls-in-${PORT}")
+    INBOUND_TAGS+=("vless-ws-${PORT}")
     INBOUND_PORTS+=("${PORT}")
     INBOUND_PROTOS+=("${PROTO}")
-    INBOUND_SNIS+=("${HTTPS_SNI}")
+    INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
     
-    print_success "HTTPS 配置完成 (SNI: ${HTTPS_SNI})"
+    print_success "VLESS-WS-TLS 配置完成 (SNI: ${NODE_SNI})"
+    save_links_to_files
+}
+
+# ==================== VLESS-H2-TLS 配置 ====================
+setup_vless_h2_tls() {
+    echo ""
+    # 端口（默认443，Enter=随机）
+    while true; do
+        read -p "监听端口 [Enter=随机, 默认443]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机端口: ${PORT}"
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+    
+    # SNI（默认DEFAULT_SNI，Enter=随机）
+    echo -e "${YELLOW}请输入SNI域名${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [Enter=随机, 默认${DEFAULT_SNI}]: " NODE_SNI
+    if [[ -z "$NODE_SNI" ]]; then
+        NODE_SNI=$(get_random_sni)
+        print_info "随机SNI: ${NODE_SNI}"
+    fi
+    
+    # UUID（自动随机）
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+    
+    # H2 path（默认/，Enter=随机）
+    local NODE_PATH="/"
+    local RANDOM_PATH=$(openssl rand -hex 4)
+    echo -e "${YELLOW}HTTP/2 路径 (Enter=随机)${NC}"
+    read -p "路径 [/${RANDOM_PATH}]: " INPUT_PATH
+    if [[ -z "$INPUT_PATH" ]]; then
+        NODE_PATH="/${RANDOM_PATH}"
+    else
+        NODE_PATH="${INPUT_PATH}"
+    fi
+    print_info "H2 路径: ${NODE_PATH}"
+    
+    # 是否启用 multiplex
+    local NODE_MULTIPLEX=""
+    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
+    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        NODE_MULTIPLEX=",
+  \"multiplex\": {\"enabled\": true, \"padding\": true}"
+    fi
+    
+    # 生成自签证书
+    print_info "为 ${NODE_SNI} 生成自签证书..."
+    gen_cert_for_sni "${NODE_SNI}"
+    
+    print_info "生成配置文件..."
+    
+    local listen_addr=$(get_listen_address)
+    local inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${NODE_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }${NODE_MULTIPLEX}
+}"
+    
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+    
+    PROTO="VLESS-H2-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
+    
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=http&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "VLESS-H2-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+    LINK="$link_ipv4"
+    
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=http&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-H2-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+    
+    INBOUND_TAGS+=("vless-h2-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${NODE_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+    
+    print_success "VLESS-H2-TLS 配置完成 (SNI: ${NODE_SNI})"
+    save_links_to_files
+}
+
+# ==================== VLESS-HTTPUpgrade-TLS 配置 ====================
+setup_vless_httpupgrade_tls() {
+    echo ""
+    # 端口（默认443，Enter=随机）
+    while true; do
+        read -p "监听端口 [Enter=随机, 默认443]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机端口: ${PORT}"
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+    
+    # SNI（默认DEFAULT_SNI，Enter=随机）
+    echo -e "${YELLOW}请输入SNI域名${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [Enter=随机, 默认${DEFAULT_SNI}]: " NODE_SNI
+    if [[ -z "$NODE_SNI" ]]; then
+        NODE_SNI=$(get_random_sni)
+        print_info "随机SNI: ${NODE_SNI}"
+    fi
+    
+    # UUID（自动随机）
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+    
+    # Path（默认/，Enter=随机）
+    local NODE_PATH="/"
+    local RANDOM_PATH=$(openssl rand -hex 4)
+    echo -e "${YELLOW}HTTPUpgrade 路径 (Enter=随机)${NC}"
+    read -p "路径 [/${RANDOM_PATH}]: " INPUT_PATH
+    if [[ -z "$INPUT_PATH" ]]; then
+        NODE_PATH="/${RANDOM_PATH}"
+    else
+        NODE_PATH="${INPUT_PATH}"
+    fi
+    print_info "路径: ${NODE_PATH}"
+    
+    # 是否启用 multiplex
+    local NODE_MULTIPLEX=""
+    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
+    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        NODE_MULTIPLEX=",
+  \"multiplex\": {\"enabled\": true, \"padding\": true}"
+    fi
+    
+    # 生成自签证书
+    print_info "为 ${NODE_SNI} 生成自签证书..."
+    gen_cert_for_sni "${NODE_SNI}"
+    
+    print_info "生成配置文件..."
+    
+    local listen_addr=$(get_listen_address)
+    local inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${NODE_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }${NODE_MULTIPLEX}
+}"
+    
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+    
+    PROTO="VLESS-HTTPUpgrade-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
+    
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+    LINK="$link_ipv4"
+    
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+    
+    INBOUND_TAGS+=("vless-hu-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${NODE_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+    
+    print_success "VLESS-HTTPUpgrade-TLS 配置完成 (SNI: ${NODE_SNI})"
+    save_links_to_files
+}
+
+# ==================== VLESS-HTTP2-REALITY 配置 ====================
+setup_vless_http2_reality() {
+    echo ""
+    # 端口（默认443，Enter=随机）
+    while true; do
+        read -p "监听端口 [Enter=随机, 默认443]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机端口: ${PORT}"
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+    
+    # SNI（默认DEFAULT_SNI，Enter=随机）
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [Enter=随机, 默认${DEFAULT_SNI}]: " NODE_SNI
+    if [[ -z "$NODE_SNI" ]]; then
+        NODE_SNI=$(get_random_sni)
+        print_info "随机SNI: ${NODE_SNI}"
+    fi
+    
+    # UUID（自动随机）
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+    
+    # Short ID（自动随机）
+    local NODE_SHORT_ID=$(openssl rand -hex 8)
+    print_info "Short ID: ${NODE_SHORT_ID}"
+    
+    # 是否启用 multiplex
+    local NODE_MULTIPLEX=""
+    echo -e "${YELLOW}是否启用 Multiplex 多路复用？(y/N)${NC}"
+    read -p "启用 Multiplex? [y/N]: " ENABLE_MULTIPLEX
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        NODE_MULTIPLEX=",
+  \"multiplex\": {\"enabled\": true, \"padding\": true}"
+    fi
+    
+    print_info "生成配置文件..."
+    
+    local listen_addr=$(get_listen_address)
+    local inbound="{
+  \"type\": \"vless\",
+  \"tag\": \"vless-h2r-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\"}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"/\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"reality\": {
+      \"enabled\": true,
+      \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
+      \"private_key\": \"${REALITY_PRIVATE}\",
+      \"short_id\": [\"${NODE_SHORT_ID}\"]
+    }
+  }${NODE_MULTIPLEX}
+}"
+    
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+    
+    PROTO="VLESS-H2-REALITY"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPublic Key: ${REALITY_PUBLIC}\nShort ID: ${NODE_SHORT_ID}\nSNI: ${NODE_SNI}"
+    
+    CURRENT_NEW_LINKS=""
+    
+    # IPv4 链接
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=http&allowInsecure=1#VLESS-H2-REALITY-${SERVER_IP}"
+    add_link "$link_ipv4" "VLESS-H2-REALITY" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
+    LINK="$link_ipv4"
+    
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-REALITY] ${SERVER_IP}:${PORT} (SNI: ${NODE_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+    
+    # IPv6 链接（如果有）
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=reality&sni=${NODE_SNI}&fp=chrome&pbk=${REALITY_PUBLIC}&sid=${NODE_SHORT_ID}&type=http&allowInsecure=1#VLESS-H2-REALITY-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "VLESS-H2-REALITY" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-REALITY] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+    
+    INBOUND_TAGS+=("vless-h2r-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${NODE_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+    
+    print_success "VLESS-H2-REALITY 配置完成 (SNI: ${NODE_SNI})"
     save_links_to_files
 }
 
@@ -2035,6 +2735,1398 @@ EOF
     fi
     save_links_to_files
 }
+
+# ==================== VMess TCP 配置 ====================
+setup_vmess_tcp() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # HTTP 混淆
+    local ENABLE_HTTP_OBFS="N"
+    local HTTP_HOST=""
+    local HTTP_PATH=""
+    read -p "是否启用 HTTP 混淆？(y/N): " ENABLE_HTTP_OBFS
+    ENABLE_HTTP_OBFS=${ENABLE_HTTP_OBFS:-N}
+    if [[ "$ENABLE_HTTP_OBFS" =~ ^[Yy]$ ]]; then
+        read -p "HTTP Host [留空随机]: " HTTP_HOST
+        if [[ -z "$HTTP_HOST" ]]; then
+            HTTP_HOST=$(get_random_sni)
+            print_info "随机 HTTP Host: ${HTTP_HOST}"
+        fi
+        read -p "HTTP Path [留空随机]: " HTTP_PATH
+        if [[ -z "$HTTP_PATH" ]]; then
+            HTTP_PATH="/$(openssl rand -hex 8)"
+            print_info "随机 HTTP Path: ${HTTP_PATH}"
+        fi
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local transport_config=""
+    if [[ "$ENABLE_HTTP_OBFS" =~ ^[Yy]$ ]]; then
+        transport_config=",
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${HTTP_PATH}\",
+    \"headers\": {\"Host\": \"${HTTP_HOST}\"}
+  }"
+    fi
+
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-tcp-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}]${transport_config}${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-TCP"
+    local vmess_network="tcp"
+    local vmess_host=""
+    local vmess_path=""
+    if [[ "$ENABLE_HTTP_OBFS" =~ ^[Yy]$ ]]; then
+        vmess_network="http"
+        vmess_host="${HTTP_HOST}"
+        vmess_path="${HTTP_PATH}"
+    fi
+    EXTRA_INFO="UUID: ${NODE_UUID}"
+    if [[ "$ENABLE_HTTP_OBFS" =~ ^[Yy]$ ]]; then
+        EXTRA_INFO="${EXTRA_INFO}\nHTTP Host: ${HTTP_HOST}\nHTTP Path: ${HTTP_PATH}"
+    fi
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-TCP-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"'"${vmess_network}"'","type":"none","host":"'"${vmess_host}"'","path":"'"${vmess_path}"'","tls":""}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" ""
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT}\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-TCP-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"'"${vmess_network}"'","type":"none","host":"'"${vmess_host}"'","path":"'"${vmess_path}"'","tls":""}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" ""
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT}\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-tcp-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-TCP 配置完成"
+    save_links_to_files
+}
+
+# ==================== VMess HTTP 配置 ====================
+setup_vmess_http() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # HTTP Host
+    local HTTP_HOST=""
+    read -p "HTTP Host [留空随机]: " HTTP_HOST
+    if [[ -z "$HTTP_HOST" ]]; then
+        HTTP_HOST=$(get_random_sni)
+        print_info "随机 HTTP Host: ${HTTP_HOST}"
+    fi
+
+    # HTTP Path
+    local HTTP_PATH=""
+    read -p "HTTP Path [留空随机]: " HTTP_PATH
+    if [[ -z "$HTTP_PATH" ]]; then
+        HTTP_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 HTTP Path: ${HTTP_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-http-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${HTTP_PATH}\",
+    \"headers\": {\"Host\": \"${HTTP_HOST}\"}
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-HTTP"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nHTTP Host: ${HTTP_HOST}\nHTTP Path: ${HTTP_PATH}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTP-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"http","type":"none","host":"'"${HTTP_HOST}"'","path":"'"${HTTP_PATH}"'","tls":""}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" ""
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT}\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTP-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"http","type":"none","host":"'"${HTTP_HOST}"'","path":"'"${HTTP_PATH}"'","tls":""}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" ""
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT}\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-http-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-HTTP 配置完成"
+    save_links_to_files
+}
+
+# ==================== VMess QUIC 配置 ====================
+setup_vmess_quic() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # 拥塞控制
+    echo -e "${YELLOW}请选择 QUIC 拥塞控制算法${NC}"
+    echo -e "${CYAN}1) cubic (默认)${NC}"
+    echo -e "${CYAN}2) new_reno${NC}"
+    echo -e "${CYAN}3) bbr${NC}"
+    read -p "拥塞控制 [cubic]: " CONGESTION
+    CONGESTION=${CONGESTION:-cubic}
+    case "$CONGESTION" in
+        1|cubic) CONGESTION="cubic" ;;
+        2|new_reno) CONGESTION="new_reno" ;;
+        3|bbr) CONGESTION="bbr" ;;
+        *) CONGESTION="cubic" ;;
+    esac
+    print_info "拥塞控制: ${CONGESTION}"
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-quic-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {\"type\": \"quic\"}${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-QUIC"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n拥塞控制: ${CONGESTION}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-QUIC-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"quic","type":"none","host":"","path":"","tls":""}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" ""
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT}\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-QUIC-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"quic","type":"none","host":"","path":"","tls":""}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" ""
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT}\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-quic-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-QUIC 配置完成"
+    save_links_to_files
+}
+
+# ==================== VMess WebSocket TLS 配置 ====================
+setup_vmess_ws_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " VMESS_WS_SNI
+    if [[ -z "$VMESS_WS_SNI" ]]; then
+        VMESS_WS_SNI=$(get_random_sni)
+        print_info "随机SNI: ${VMESS_WS_SNI}"
+    fi
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # WS Path
+    local WS_PATH=""
+    read -p "WebSocket Path [留空随机]: " WS_PATH
+    if [[ -z "$WS_PATH" ]]; then
+        WS_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 WS Path: ${WS_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${VMESS_WS_SNI} 生成自签证书..."
+    gen_cert_for_sni "${VMESS_WS_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-ws-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${WS_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_WS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-WS-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nWS Path: ${WS_PATH}\n证书: 自签证书(${VMESS_WS_SNI})\nSNI: ${VMESS_WS_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_WS_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_WS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-ws-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${VMESS_WS_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-WS-TLS 配置完成 (SNI: ${VMESS_WS_SNI})"
+    save_links_to_files
+}
+
+# ==================== VMess HTTP/2 TLS 配置 ====================
+setup_vmess_h2_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " VMESS_H2_SNI
+    if [[ -z "$VMESS_H2_SNI" ]]; then
+        VMESS_H2_SNI=$(get_random_sni)
+        print_info "随机SNI: ${VMESS_H2_SNI}"
+    fi
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # H2 Path
+    local H2_PATH=""
+    read -p "HTTP/2 Path [留空随机]: " H2_PATH
+    if [[ -z "$H2_PATH" ]]; then
+        H2_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 H2 Path: ${H2_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${VMESS_H2_SNI} 生成自签证书..."
+    gen_cert_for_sni "${VMESS_H2_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${H2_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_H2_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-H2-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nH2 Path: ${H2_PATH}\n证书: 自签证书(${VMESS_H2_SNI})\nSNI: ${VMESS_H2_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_H2_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_H2_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-h2-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${VMESS_H2_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-H2-TLS 配置完成 (SNI: ${VMESS_H2_SNI})"
+    save_links_to_files
+}
+
+# ==================== VMess HTTPUpgrade TLS 配置 ====================
+setup_vmess_httpupgrade_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " VMESS_HU_SNI
+    if [[ -z "$VMESS_HU_SNI" ]]; then
+        VMESS_HU_SNI=$(get_random_sni)
+        print_info "随机SNI: ${VMESS_HU_SNI}"
+    fi
+
+    local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_UUID}"
+
+    # Path
+    local HU_PATH=""
+    read -p "HTTPUpgrade Path [留空随机]: " HU_PATH
+    if [[ -z "$HU_PATH" ]]; then
+        HU_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 Path: ${HU_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${VMESS_HU_SNI} 生成自签证书..."
+    gen_cert_for_sni "${VMESS_HU_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"vmess\",
+  \"tag\": \"vmess-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_UUID}\", \"alterId\": 0}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${HU_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_HU_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="VMess-HTTPUpgrade-TLS"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPath: ${HU_PATH}\n证书: 自签证书(${VMESS_HU_SNI})\nSNI: ${VMESS_HU_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+    local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_HU_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+        local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_HU_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("vmess-hu-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${VMESS_HU_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "VMess-HTTPUpgrade-TLS 配置完成 (SNI: ${VMESS_HU_SNI})"
+    save_links_to_files
+}
+
+# ==================== Trojan TLS 配置 ====================
+setup_trojan_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " TROJAN_TLS_SNI
+    if [[ -z "$TROJAN_TLS_SNI" ]]; then
+        TROJAN_TLS_SNI=$(get_random_sni)
+        print_info "随机SNI: ${TROJAN_TLS_SNI}"
+    fi
+
+    local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${TROJAN_TLS_SNI} 生成自签证书..."
+    gen_cert_for_sni "${TROJAN_TLS_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-tls-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_TLS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="Trojan-TLS"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\n证书: 自签证书(${TROJAN_TLS_SNI})\nSNI: ${TROJAN_TLS_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_TLS_SNI}&allowInsecure=1#Trojan-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_TLS_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_TLS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_TLS_SNI}&allowInsecure=1#Trojan-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_TLS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_TLS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("trojan-tls-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${TROJAN_TLS_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "Trojan-TLS 配置完成 (SNI: ${TROJAN_TLS_SNI})"
+    save_links_to_files
+}
+
+# ==================== Trojan WebSocket TLS 配置 ====================
+setup_trojan_ws_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " TROJAN_WS_SNI
+    if [[ -z "$TROJAN_WS_SNI" ]]; then
+        TROJAN_WS_SNI=$(get_random_sni)
+        print_info "随机SNI: ${TROJAN_WS_SNI}"
+    fi
+
+    local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
+
+    # WS Path
+    local WS_PATH=""
+    read -p "WebSocket Path [留空随机]: " WS_PATH
+    if [[ -z "$WS_PATH" ]]; then
+        WS_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 WS Path: ${WS_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${TROJAN_WS_SNI} 生成自签证书..."
+    gen_cert_for_sni "${TROJAN_WS_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-ws-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"ws\",
+    \"path\": \"${WS_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_WS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="Trojan-WS-TLS"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nWS Path: ${WS_PATH}\n证书: 自签证书(${TROJAN_WS_SNI})\nSNI: ${TROJAN_WS_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_WS_SNI}&type=ws&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_WS_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_WS_SNI}&type=ws&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_WS_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("trojan-ws-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${TROJAN_WS_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "Trojan-WS-TLS 配置完成 (SNI: ${TROJAN_WS_SNI})"
+    save_links_to_files
+}
+
+# ==================== Trojan HTTP/2 TLS 配置 ====================
+setup_trojan_h2_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " TROJAN_H2_SNI
+    if [[ -z "$TROJAN_H2_SNI" ]]; then
+        TROJAN_H2_SNI=$(get_random_sni)
+        print_info "随机SNI: ${TROJAN_H2_SNI}"
+    fi
+
+    local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
+
+    # H2 Path
+    local H2_PATH=""
+    read -p "HTTP/2 Path [留空随机]: " H2_PATH
+    if [[ -z "$H2_PATH" ]]; then
+        H2_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 H2 Path: ${H2_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${TROJAN_H2_SNI} 生成自签证书..."
+    gen_cert_for_sni "${TROJAN_H2_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-h2-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"http\",
+    \"path\": \"${H2_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_H2_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="Trojan-H2-TLS"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nH2 Path: ${H2_PATH}\n证书: 自签证书(${TROJAN_H2_SNI})\nSNI: ${TROJAN_H2_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_H2_SNI}&type=http&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_H2_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_H2_SNI}&type=http&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_H2_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("trojan-h2-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${TROJAN_H2_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "Trojan-H2-TLS 配置完成 (SNI: ${TROJAN_H2_SNI})"
+    save_links_to_files
+}
+
+# ==================== Trojan HTTPUpgrade TLS 配置 ====================
+setup_trojan_httpupgrade_tls() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " TROJAN_HU_SNI
+    if [[ -z "$TROJAN_HU_SNI" ]]; then
+        TROJAN_HU_SNI=$(get_random_sni)
+        print_info "随机SNI: ${TROJAN_HU_SNI}"
+    fi
+
+    local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
+
+    # Path
+    local HU_PATH=""
+    read -p "HTTPUpgrade Path [留空随机]: " HU_PATH
+    if [[ -z "$HU_PATH" ]]; then
+        HU_PATH="/$(openssl rand -hex 8)"
+        print_info "随机 Path: ${HU_PATH}"
+    fi
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${TROJAN_HU_SNI} 生成自签证书..."
+    gen_cert_for_sni "${TROJAN_HU_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"trojan\",
+  \"tag\": \"trojan-hu-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
+  \"transport\": {
+    \"type\": \"httpupgrade\",
+    \"path\": \"${HU_PATH}\"
+  },
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_HU_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/private.key\"
+  }${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="Trojan-HTTPUpgrade-TLS"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nPath: ${HU_PATH}\n证书: 自签证书(${TROJAN_HU_SNI})\nSNI: ${TROJAN_HU_SNI}"
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&sni=${TROJAN_HU_SNI}&type=httpupgrade&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_HU_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?security=tls&sni=${TROJAN_HU_SNI}&type=httpupgrade&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_HU_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("trojan-hu-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${TROJAN_HU_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "Trojan-HTTPUpgrade-TLS 配置完成 (SNI: ${TROJAN_HU_SNI})"
+    save_links_to_files
+}
+
+# ==================== TUIC 配置 ====================
+setup_tuic() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    echo -e "${YELLOW}请输入SNI域名（建议使用常见HTTPS网站域名）${NC}"
+    echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+    read -p "SNI域名 [留空随机]: " TUIC_SNI
+    if [[ -z "$TUIC_SNI" ]]; then
+        TUIC_SNI=$(get_random_sni)
+        print_info "随机SNI: ${TUIC_SNI}"
+    fi
+
+    local NODE_TUIC_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+    print_info "节点 UUID: ${NODE_TUIC_UUID}"
+
+    local NODE_TUIC_PASSWORD=$(openssl rand -hex 16)
+    print_info "节点密码: ${NODE_TUIC_PASSWORD}"
+
+    # 拥塞控制
+    echo -e "${YELLOW}请选择拥塞控制算法${NC}"
+    echo -e "${CYAN}1) cubic (默认)${NC}"
+    echo -e "${CYAN}2) new_reno${NC}"
+    echo -e "${CYAN}3) bbr${NC}"
+    read -p "拥塞控制 [cubic]: " CONGESTION
+    CONGESTION=${CONGESTION:-cubic}
+    case "$CONGESTION" in
+        1|cubic) CONGESTION="cubic" ;;
+        2|new_reno) CONGESTION="new_reno" ;;
+        3|bbr) CONGESTION="bbr" ;;
+        *) CONGESTION="cubic" ;;
+    esac
+    print_info "拥塞控制: ${CONGESTION}"
+
+    # 0-RTT
+    local ENABLE_ZERORTT="N"
+    read -p "是否启用 0-RTT？(y/N): " ENABLE_ZERORTT
+    ENABLE_ZERORTT=${ENABLE_ZERORTT:-N}
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    # 生成自签证书
+    print_info "为 ${TUIC_SNI} 生成自签证书..."
+    gen_cert_for_sni "${TUIC_SNI}"
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local zerortt_config=""
+    if [[ "$ENABLE_ZERORTT" =~ ^[Yy]$ ]]; then
+        zerortt_config=",
+  \"zero_rtt_time\": 900"
+    fi
+
+    local inbound="{
+  \"type\": \"tuic\",
+  \"tag\": \"tuic-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"users\": [{\"uuid\": \"${NODE_TUIC_UUID}\", \"password\": \"${NODE_TUIC_PASSWORD}\"}],
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TUIC_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TUIC_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TUIC_SNI}/private.key\",
+    \"alpn\": [\"h3\"]
+  },
+  \"congestion_control\": \"${CONGESTION}\"${zerortt_config}${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="TUIC"
+    EXTRA_INFO="UUID: ${NODE_TUIC_UUID}\n密码: ${NODE_TUIC_PASSWORD}\n拥塞控制: ${CONGESTION}\n证书: 自签证书(${TUIC_SNI})\nSNI: ${TUIC_SNI}"
+    if [[ "$ENABLE_ZERORTT" =~ ^[Yy]$ ]]; then
+        EXTRA_INFO="${EXTRA_INFO}\n0-RTT: 已启用"
+    fi
+
+    CURRENT_NEW_LINKS=""
+
+    # IPv4 链接
+    local link_ipv4="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@${SERVER_IP}:${PORT}?sni=${TUIC_SNI}&congestion_control=${CONGESTION}&allowInsecure=1#TUIC-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TUIC_SNI}"
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT} (SNI: ${TUIC_SNI})\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@[${SERVER_IPV6}]:${PORT}?sni=${TUIC_SNI}&congestion_control=${CONGESTION}&allowInsecure=1#TUIC-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TUIC_SNI}"
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TUIC_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("tuic-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("${TUIC_SNI}")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "TUIC 配置完成 (SNI: ${TUIC_SNI})"
+    save_links_to_files
+}
+
+# ==================== Shadowsocks 配置 ====================
+setup_shadowsocks() {
+    echo ""
+    while true; do
+        read -p "监听端口 [留空随机分配]: " PORT
+        if [[ -z "$PORT" ]]; then
+            PORT=$(get_random_free_port)
+            print_info "随机分配端口: ${PORT}"
+            break
+        fi
+        if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+            print_error "端口无效，请输入 1-65535 之间的数字"
+            continue
+        fi
+        if check_port_in_use "$PORT"; then
+            local proc_info=$(get_port_process "$PORT")
+            print_warning "端口 ${PORT} 已被占用"
+            [[ -n "$proc_info" ]] && print_info "占用进程: ${proc_info}"
+            continue
+        fi
+        break
+    done
+
+    # 加密方法
+    echo -e "${YELLOW}请选择加密方法${NC}"
+    echo -e "${CYAN}1) 2022-blake3-aes-128-gcm (默认)${NC}"
+    echo -e "${CYAN}2) 2022-blake3-aes-256-gcm${NC}"
+    echo -e "${CYAN}3) 2022-blake3-chacha20-poly1305${NC}"
+    read -p "加密方法 [2022-blake3-aes-128-gcm]: " SS_METHOD
+    SS_METHOD=${SS_METHOD:-"2022-blake3-aes-128-gcm"}
+    case "$SS_METHOD" in
+        1|"2022-blake3-aes-128-gcm") SS_METHOD="2022-blake3-aes-128-gcm" ;;
+        2|"2022-blake3-aes-256-gcm") SS_METHOD="2022-blake3-aes-256-gcm" ;;
+        3|"2022-blake3-chacha20-poly1305") SS_METHOD="2022-blake3-chacha20-poly1305" ;;
+        *) SS_METHOD="2022-blake3-aes-128-gcm" ;;
+    esac
+    print_info "加密方法: ${SS_METHOD}"
+
+    # 密码
+    local NODE_SS_PASSWORD=$(openssl rand -base64 32)
+    print_info "节点密码: ${NODE_SS_PASSWORD}"
+
+    # 多路复用
+    local ENABLE_MULTIPLEX="N"
+    read -p "是否启用多路复用？(y/N): " ENABLE_MULTIPLEX
+    ENABLE_MULTIPLEX=${ENABLE_MULTIPLEX:-N}
+
+    print_info "生成配置文件..."
+
+    local listen_addr=$(get_listen_address)
+    local multiplex_config=""
+    if [[ "$ENABLE_MULTIPLEX" =~ ^[Yy]$ ]]; then
+        multiplex_config=",
+  \"multiplex\": {
+    \"enabled\": true,
+    \"padding\": true
+  }"
+    fi
+
+    local inbound="{
+  \"type\": \"shadowsocks\",
+  \"tag\": \"ss-${PORT}\",
+  \"listen\": \"${listen_addr}\",
+  \"listen_port\": ${PORT},
+  \"method\": \"${SS_METHOD}\",
+  \"password\": \"${NODE_SS_PASSWORD}\"${multiplex_config}
+}"
+
+    if [[ -z "$INBOUNDS_JSON" ]]; then
+        INBOUNDS_JSON="$inbound"
+    else
+        INBOUNDS_JSON="${INBOUNDS_JSON},${inbound}"
+    fi
+
+    PROTO="Shadowsocks"
+    EXTRA_INFO="方法: ${SS_METHOD}\n密码: ${NODE_SS_PASSWORD}"
+
+    CURRENT_NEW_LINKS=""
+
+    # SS 链接: ss://BASE64(method:password)@IP:PORT#SS-IP
+    local ss_userinfo=$(echo -n "${SS_METHOD}:${NODE_SS_PASSWORD}" | base64 -w0)
+
+    # IPv4 链接
+    local link_ipv4="ss://${ss_userinfo}@${SERVER_IP}:${PORT}#SS-${SERVER_IP}"
+    add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" ""
+    LINK="$link_ipv4"
+
+    CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] ${SERVER_IP}:${PORT}\n${link_ipv4}\n----------------------------------------\n\n"
+
+    # IPv6 链接
+    if [[ -n "${SERVER_IPV6}" ]]; then
+        local link_ipv6="ss://${ss_userinfo}@[${SERVER_IPV6}]:${PORT}#SS-[${SERVER_IPV6}]"
+        add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" ""
+        CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT}\n${link_ipv6}\n----------------------------------------\n\n"
+    fi
+
+    INBOUND_TAGS+=("ss-${PORT}")
+    INBOUND_PORTS+=("${PORT}")
+    INBOUND_PROTOS+=("${PROTO}")
+    INBOUND_SNIS+=("")
+    INBOUND_RELAY_TAGS+=("direct")
+
+    print_success "Shadowsocks 配置完成"
+    save_links_to_files
+}
+
 # ==================== 中转链接解析 ====================
 parse_socks_link() {
     local link="$1"
@@ -3160,49 +5252,115 @@ clear_relay() {
     fi
 }
 
-# ==================== Reality 节点修改 ====================
-modify_reality_node() {
+# ==================== VLESS 节点修改 ====================
+modify_vless_node() {
     if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
         print_warning "当前没有可修改的节点"
         return 1
     fi
     
     echo ""
-    echo -e "${CYAN}当前 Reality 节点:${NC}"
-    local reality_nodes=()
+    echo -e "${CYAN}当前 VLESS 节点:${NC}"
+    local vless_nodes=()
     for i in "${!INBOUND_TAGS[@]}"; do
-        if [[ "${INBOUND_PROTOS[$i]}" == "Reality" ]]; then
-            reality_nodes+=("$i")
-            echo -e "  ${GREEN}[${#reality_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        if [[ "${INBOUND_PROTOS[$i]}" == VLESS-* ]]; then
+            vless_nodes+=("$i")
+            echo -e "  ${GREEN}[${#vless_nodes[@]}]${NC} ${INBOUND_PROTOS[$i]} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}"
         fi
     done
     
-    if [[ ${#reality_nodes[@]} -eq 0 ]]; then
-        print_warning "没有找到 Reality 节点"
+    if [[ ${#vless_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 VLESS 节点"
         return 1
     fi
     
     read -p "请选择要修改的节点序号 (0 取消): " node_choice
     [[ "$node_choice" == "0" ]] && return 0
     local idx=$((node_choice-1))
-    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#reality_nodes[@]} )); then
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#vless_nodes[@]} )); then
         print_error "序号无效"
         return 1
     fi
     
-    local array_idx="${reality_nodes[$idx]}"
+    local array_idx="${vless_nodes[$idx]}"
     local tag="${INBOUND_TAGS[$array_idx]}"
     local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local proto="${INBOUND_PROTOS[$array_idx]}"
+    
+    # 根据协议变体判断功能
+    local is_reality=0
+    local has_transport=0
+    local tag_prefix=""
+    
+    case "$proto" in
+        VLESS-REALITY)
+            is_reality=1
+            tag_prefix="vless-r"
+            ;;
+        VLESS-H2-REALITY)
+            is_reality=1
+            has_transport=1
+            tag_prefix="vless-h2r"
+            ;;
+        VLESS-WS-TLS)
+            has_transport=1
+            tag_prefix="vless-ws"
+            ;;
+        VLESS-H2-TLS)
+            has_transport=1
+            tag_prefix="vless-h2"
+            ;;
+        VLESS-HTTPUpgrade-TLS)
+            has_transport=1
+            tag_prefix="vless-hu"
+            ;;
+        *)
+            # 兼容旧标签
+            if [[ "$tag" == *"vless-in-"* ]]; then
+                is_reality=1
+                tag_prefix="vless-r"
+            elif [[ "$tag" == *"vless-tls-in-"* ]]; then
+                has_transport=1
+                tag_prefix="vless-ws"
+            else
+                tag_prefix="vless-r"
+            fi
+            ;;
+    esac
     
     config_changed=0
     
     while true; do
         echo ""
-        echo -e "${CYAN}修改 Reality 节点 ${tag}:${NC}"
-        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${INBOUND_SNIS[$array_idx]})"
-        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
-        echo -e "  ${GREEN}[4]${NC} 重新生成 Short ID"
+        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        local menu_num=1
+        echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
+        local sni_num=0 path_num=0 uuid_num=0 sid_num=0 mpx_num=0
+        
+        if [[ "$proto" =~ TLS$ || "$is_reality" -eq 1 ]]; then
+            ((menu_num++)); sni_num=$menu_num
+            echo -e "  ${GREEN}[${sni_num}]${NC} 修改 SNI (当前: ${current_sni})"
+        fi
+        
+        if [[ $has_transport -eq 1 ]]; then
+            ((menu_num++)); path_num=$menu_num
+            local current_path=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).transport.path // "/"' "${CONFIG_FILE}")
+            echo -e "  ${GREEN}[${path_num}]${NC} 修改路径 (当前: ${current_path})"
+        fi
+        
+        ((menu_num++)); uuid_num=$menu_num
+        echo -e "  ${GREEN}[${uuid_num}]${NC} 重新生成 UUID"
+        
+        if [[ $is_reality -eq 1 ]]; then
+            ((menu_num++)); sid_num=$menu_num
+            echo -e "  ${GREEN}[${sid_num}]${NC} 重新生成 Short ID"
+        fi
+        
+        ((menu_num++)); mpx_num=$menu_num
+        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
+        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
+        
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
         
@@ -3220,7 +5378,7 @@ modify_reality_node() {
                 if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
                     print_warning "端口 ${new_port} 已被占用"; continue
                 fi
-                local new_tag="vless-in-${new_port}"
+                local new_tag="${tag_prefix}-${new_port}"
                 jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
                     '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
@@ -3236,21 +5394,46 @@ modify_reality_node() {
                 config_changed=1
                 print_success "端口已修改为 ${new_port}"
                 ;;
-            2)
+            $sni_num)
                 echo -e "${YELLOW}新 SNI (留空随机)${NC}"
                 echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
                 read -p "SNI: " new_sni
                 if [[ -z "$new_sni" ]]; then
                     new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if [[ $is_reality -eq 1 ]]; then
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                else
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}"
+                if [[ $is_reality -eq 1 ]]; then
+                    print_success "SNI 已修改为 ${new_sni}"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
-            3)
+            $path_num)
+                echo -e "${YELLOW}新路径 (留空随机)${NC}"
+                local random_path="/$(openssl rand -hex 4)"
+                read -p "路径 [${random_path}]: " new_path
+                if [[ -z "$new_path" ]]; then
+                    new_path="$random_path"
+                fi
+                jq --arg tag "$tag" --arg path "$new_path" \
+                    '(.inbounds[] | select(.tag == $tag)).transport.path = $path' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "路径已修改为 ${new_path}"
+                ;;
+            $uuid_num)
                 local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
                 jq --arg tag "$tag" --arg uuid "$new_uuid" \
                     '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
@@ -3258,13 +5441,416 @@ modify_reality_node() {
                 config_changed=1
                 print_success "UUID 已重新生成: ${new_uuid}"
                 ;;
-            4)
+            $sid_num)
                 local new_sid=$(openssl rand -hex 8)
                 jq --arg tag "$tag" --arg sid "$new_sid" \
                     '(.inbounds[] | select(.tag == $tag)) |= (.tls.reality.short_id = [$sid])' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 config_changed=1
                 print_success "Short ID 已重新生成: ${new_sid}"
+                ;;
+            $mpx_num)
+                if [[ "$current_mpx" == "true" ]]; then
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="false"
+                    print_success "Multiplex 已关闭"
+                else
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="true"
+                    print_success "Multiplex 已启用"
+                fi
+                config_changed=1
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
+        regenerate_links_from_config
+    fi
+}
+
+# ==================== VMess 节点修改 ====================
+modify_vmess_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 VMess 节点:${NC}"
+    local vmess_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == VMess-* ]]; then
+            vmess_nodes+=("$i")
+            echo -e "  ${GREEN}[${#vmess_nodes[@]}]${NC} ${INBOUND_PROTOS[$i]} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}"
+        fi
+    done
+    
+    if [[ ${#vmess_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 VMess 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#vmess_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${vmess_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local proto="${INBOUND_PROTOS[$array_idx]}"
+    
+    local has_tls=0
+    local has_transport=0
+    local tag_prefix=""
+    
+    case "$proto" in
+        VMess-TCP)
+            tag_prefix="vmess-tcp"
+            ;;
+        VMess-HTTP)
+            has_transport=1
+            tag_prefix="vmess-http"
+            ;;
+        VMess-QUIC)
+            tag_prefix="vmess-quic"
+            ;;
+        VMess-WS-TLS)
+            has_tls=1
+            has_transport=1
+            tag_prefix="vmess-ws"
+            ;;
+        VMess-H2-TLS)
+            has_tls=1
+            has_transport=1
+            tag_prefix="vmess-h2"
+            ;;
+        VMess-HTTPUpgrade-TLS)
+            has_tls=1
+            has_transport=1
+            tag_prefix="vmess-hu"
+            ;;
+        *)
+            tag_prefix="vmess-tcp"
+            ;;
+    esac
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        local menu_num=1
+        echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
+        local sni_num=0 path_num=0 uuid_num=0 mpx_num=0
+        
+        if [[ $has_tls -eq 1 ]]; then
+            ((menu_num++)); sni_num=$menu_num
+            echo -e "  ${GREEN}[${sni_num}]${NC} 修改 SNI (当前: ${current_sni})"
+        fi
+        
+        if [[ $has_transport -eq 1 ]]; then
+            ((menu_num++)); path_num=$menu_num
+            local current_path=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).transport.path // "/"' "${CONFIG_FILE}")
+            echo -e "  ${GREEN}[${path_num}]${NC} 修改路径 (当前: ${current_path})"
+        fi
+        
+        ((menu_num++)); uuid_num=$menu_num
+        echo -e "  ${GREEN}[${uuid_num}]${NC} 重新生成 UUID"
+        
+        ((menu_num++)); mpx_num=$menu_num
+        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
+        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
+        
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="${tag_prefix}-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            $sni_num)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                gen_cert_for_sni "${new_sni}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                ;;
+            $path_num)
+                echo -e "${YELLOW}新路径 (留空随机)${NC}"
+                local random_path="/$(openssl rand -hex 4)"
+                read -p "路径 [${random_path}]: " new_path
+                if [[ -z "$new_path" ]]; then
+                    new_path="$random_path"
+                fi
+                jq --arg tag "$tag" --arg path "$new_path" \
+                    '(.inbounds[] | select(.tag == $tag)).transport.path = $path' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "路径已修改为 ${new_path}"
+                ;;
+            $uuid_num)
+                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+                jq --arg tag "$tag" --arg uuid "$new_uuid" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "UUID 已重新生成: ${new_uuid}"
+                ;;
+            $mpx_num)
+                if [[ "$current_mpx" == "true" ]]; then
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="false"
+                    print_success "Multiplex 已关闭"
+                else
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="true"
+                    print_success "Multiplex 已启用"
+                fi
+                config_changed=1
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
+        regenerate_links_from_config
+    fi
+}
+
+# ==================== Trojan 节点修改 ====================
+modify_trojan_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 Trojan 节点:${NC}"
+    local trojan_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == Trojan-* ]]; then
+            trojan_nodes+=("$i")
+            echo -e "  ${GREEN}[${#trojan_nodes[@]}]${NC} ${INBOUND_PROTOS[$i]} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}"
+        fi
+    done
+    
+    if [[ ${#trojan_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 Trojan 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#trojan_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${trojan_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local proto="${INBOUND_PROTOS[$array_idx]}"
+    
+    local has_transport=0
+    local tag_prefix=""
+    
+    case "$proto" in
+        Trojan-TLS)
+            tag_prefix="trojan-tls"
+            ;;
+        Trojan-WS-TLS)
+            has_transport=1
+            tag_prefix="trojan-ws"
+            ;;
+        Trojan-H2-TLS)
+            has_transport=1
+            tag_prefix="trojan-h2"
+            ;;
+        Trojan-HTTPUpgrade-TLS)
+            has_transport=1
+            tag_prefix="trojan-hu"
+            ;;
+        *)
+            tag_prefix="trojan-tls"
+            ;;
+    esac
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        local menu_num=1
+        echo -e "  ${GREEN}[${menu_num}]${NC} 修改端口 (当前: ${port})"
+        local sni_num=0 path_num=0 pwd_num=0 mpx_num=0
+        
+        ((menu_num++)); sni_num=$menu_num
+        echo -e "  ${GREEN}[${sni_num}]${NC} 修改 SNI (当前: ${current_sni})"
+        
+        if [[ $has_transport -eq 1 ]]; then
+            ((menu_num++)); path_num=$menu_num
+            local current_path=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).transport.path // "/"' "${CONFIG_FILE}")
+            echo -e "  ${GREEN}[${path_num}]${NC} 修改路径 (当前: ${current_path})"
+        fi
+        
+        ((menu_num++)); pwd_num=$menu_num
+        echo -e "  ${GREEN}[${pwd_num}]${NC} 重新生成密码"
+        
+        ((menu_num++)); mpx_num=$menu_num
+        local current_mpx=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).multiplex.enabled // false' "${CONFIG_FILE}")
+        echo -e "  ${GREEN}[${mpx_num}]${NC} 切换 Multiplex (当前: ${current_mpx})"
+        
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="${tag_prefix}-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            $sni_num)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                gen_cert_for_sni "${new_sni}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                ;;
+            $path_num)
+                echo -e "${YELLOW}新路径 (留空随机)${NC}"
+                local random_path="/$(openssl rand -hex 4)"
+                read -p "路径 [${random_path}]: " new_path
+                if [[ -z "$new_path" ]]; then
+                    new_path="$random_path"
+                fi
+                jq --arg tag "$tag" --arg path "$new_path" \
+                    '(.inbounds[] | select(.tag == $tag)).transport.path = $path' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "路径已修改为 ${new_path}"
+                ;;
+            $pwd_num)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "密码已重新生成: ${new_password}"
+                ;;
+            $mpx_num)
+                if [[ "$current_mpx" == "true" ]]; then
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex.enabled = false)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="false"
+                    print_success "Multiplex 已关闭"
+                else
+                    jq --arg tag "$tag" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.multiplex = {"enabled": true, "padding": true})' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    current_mpx="true"
+                    print_success "Multiplex 已启用"
+                fi
+                config_changed=1
                 ;;
             0)
                 break
@@ -3407,50 +5993,200 @@ modify_hysteria2_node() {
     fi
 }
 
-# ==================== SOCKS5 节点修改 ====================
-modify_socks5_node() {
+# ==================== TUIC 节点修改 ====================
+modify_tuic_node() {
     if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
         print_warning "当前没有可修改的节点"
         return 1
     fi
     
     echo ""
-    echo -e "${CYAN}当前 SOCKS5 节点:${NC}"
-    local socks_nodes=()
+    echo -e "${CYAN}当前 TUIC 节点:${NC}"
+    local tuic_nodes=()
     for i in "${!INBOUND_TAGS[@]}"; do
-        if [[ "${INBOUND_PROTOS[$i]}" == "SOCKS5" ]]; then
-            socks_nodes+=("$i")
-            echo -e "  ${GREEN}[${#socks_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        if [[ "${INBOUND_PROTOS[$i]}" == "TUIC" ]]; then
+            tuic_nodes+=("$i")
+            echo -e "  ${GREEN}[${#tuic_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
         fi
     done
     
-    if [[ ${#socks_nodes[@]} -eq 0 ]]; then
-        print_warning "没有找到 SOCKS5 节点"
+    if [[ ${#tuic_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 TUIC 节点"
         return 1
     fi
     
     read -p "请选择要修改的节点序号 (0 取消): " node_choice
     [[ "$node_choice" == "0" ]] && return 0
     local idx=$((node_choice-1))
-    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#socks_nodes[@]} )); then
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#tuic_nodes[@]} )); then
         print_error "序号无效"
         return 1
     fi
     
-    local array_idx="${socks_nodes[$idx]}"
+    local array_idx="${tuic_nodes[$idx]}"
     local tag="${INBOUND_TAGS[$array_idx]}"
     local port="${INBOUND_PORTS[$array_idx]}"
-    
-    # 读取当前用户名
-    local current_user=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).users[0].username // ""' "${CONFIG_FILE}")
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local current_congestion=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).congestion_control // "cubic"' "${CONFIG_FILE}")
     
     config_changed=0
     
     while true; do
         echo ""
-        echo -e "${CYAN}修改 SOCKS5 节点 ${tag}:${NC}"
+        echo -e "${CYAN}修改 TUIC 节点 ${tag}:${NC}"
         echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
-        echo -e "  ${GREEN}[2]${NC} 修改用户名 (当前: ${current_user:-无})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
+        echo -e "  ${GREEN}[4]${NC} 重新生成密码"
+        echo -e "  ${GREEN}[5]${NC} 修改拥塞控制 (当前: ${current_congestion})"
+        echo -e "  ${GREEN}[0]${NC} 返回"
+        read -p "请选择: " mod_choice
+        
+        case $mod_choice in
+            1)
+                echo -e "${YELLOW}新端口 (留空随机分配)${NC}"
+                read -p "端口: " new_port
+                if [[ -z "$new_port" ]]; then
+                    new_port=$(get_random_free_port)
+                    [[ -z "$new_port" ]] && { print_error "无法获取随机端口"; continue; }
+                fi
+                if ! [[ "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                    print_error "端口无效"; continue
+                fi
+                if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
+                    print_warning "端口 ${new_port} 已被占用"; continue
+                fi
+                local new_tag="tuic-${new_port}"
+                jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
+                    '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
+                    jq --arg old_tag "$tag" --arg new_tag "$new_tag" \
+                        '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                fi
+                INBOUND_TAGS[$array_idx]="$new_tag"
+                INBOUND_PORTS[$array_idx]="$new_port"
+                tag="$new_tag"
+                port="$new_port"
+                config_changed=1
+                print_success "端口已修改为 ${new_port}"
+                ;;
+            2)
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
+                fi
+                jq --arg tag "$tag" --arg sni "$new_sni" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                gen_cert_for_sni "${new_sni}"
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
+                config_changed=1
+                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                ;;
+            3)
+                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+                jq --arg tag "$tag" --arg uuid "$new_uuid" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "UUID 已重新生成: ${new_uuid}"
+                ;;
+            4)
+                local new_password=$(openssl rand -hex 16)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].password = $password)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                config_changed=1
+                print_success "密码已重新生成: ${new_password}"
+                ;;
+            5)
+                echo -e "${YELLOW}请选择拥塞控制算法${NC}"
+                echo -e "${CYAN}1) cubic${NC}"
+                echo -e "${CYAN}2) new_reno${NC}"
+                echo -e "${CYAN}3) bbr${NC}"
+                read -p "拥塞控制 [${current_congestion}]: " new_congestion
+                case "$new_congestion" in
+                    1|cubic) new_congestion="cubic" ;;
+                    2|new_reno) new_congestion="new_reno" ;;
+                    3|bbr) new_congestion="bbr" ;;
+                    *) new_congestion="$current_congestion" ;;
+                esac
+                jq --arg tag "$tag" --arg cc "$new_congestion" \
+                    '(.inbounds[] | select(.tag == $tag)).congestion_control = $cc' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                current_congestion="$new_congestion"
+                config_changed=1
+                print_success "拥塞控制已修改为 ${new_congestion}"
+                ;;
+            0)
+                break
+                ;;
+            *)
+                print_error "无效选项"
+                ;;
+        esac
+    done
+    
+    if [[ $config_changed -eq 1 ]]; then
+        load_inbounds_from_config
+        generate_config && start_svc
+        regenerate_links_from_config
+    fi
+}
+
+# ==================== AnyTLS 节点修改 ====================
+modify_anytls_node() {
+    if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
+        print_warning "当前没有可修改的节点"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}当前 AnyTLS 节点:${NC}"
+    local anytls_nodes=()
+    for i in "${!INBOUND_TAGS[@]}"; do
+        if [[ "${INBOUND_PROTOS[$i]}" == "AnyTLS" || "${INBOUND_PROTOS[$i]}" == "AnyTLS+REALITY" ]]; then
+            anytls_nodes+=("$i")
+            echo -e "  ${GREEN}[${#anytls_nodes[@]}]${NC} 协议: ${INBOUND_PROTOS[$i]}, 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        fi
+    done
+    
+    if [[ ${#anytls_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 AnyTLS 节点"
+        return 1
+    fi
+    
+    read -p "请选择要修改的节点序号 (0 取消): " node_choice
+    [[ "$node_choice" == "0" ]] && return 0
+    local idx=$((node_choice-1))
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#anytls_nodes[@]} )); then
+        print_error "序号无效"
+        return 1
+    fi
+    
+    local array_idx="${anytls_nodes[$idx]}"
+    local tag="${INBOUND_TAGS[$array_idx]}"
+    local port="${INBOUND_PORTS[$array_idx]}"
+    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local proto="${INBOUND_PROTOS[$array_idx]}"
+    
+    local is_reality=0
+    if [[ "$proto" == "AnyTLS+REALITY" ]]; then
+        is_reality=1
+    fi
+    
+    config_changed=0
+    
+    while true; do
+        echo ""
+        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
+        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
         echo -e "  ${GREEN}[3]${NC} 重新生成密码"
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
@@ -3469,7 +6205,12 @@ modify_socks5_node() {
                 if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
                     print_warning "端口 ${new_port} 已被占用"; continue
                 fi
-                local new_tag="socks-in-${new_port}"
+                local new_tag
+                if [[ $is_reality -eq 1 ]]; then
+                    new_tag="anytls-reality-${new_port}"
+                else
+                    new_tag="anytls-in-${new_port}"
+                fi
                 jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
                     '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
@@ -3486,17 +6227,30 @@ modify_socks5_node() {
                 print_success "端口已修改为 ${new_port}"
                 ;;
             2)
-                echo -e "${YELLOW}新用户名 (留空随机生成)${NC}"
-                read -p "用户名: " new_user
-                if [[ -z "$new_user" ]]; then
-                    new_user="user_$(openssl rand -hex 4)"
+                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
+                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
+                read -p "SNI: " new_sni
+                if [[ -z "$new_sni" ]]; then
+                    new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg user "$new_user" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].username = $user)' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                current_user="$new_user"
+                if [[ $is_reality -eq 1 ]]; then
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                else
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
+                INBOUND_SNIS[$array_idx]="$new_sni"
+                current_sni="$new_sni"
                 config_changed=1
-                print_success "用户名已修改为 ${new_user}"
+                if [[ $is_reality -eq 1 ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，handshake.server 已同步更新"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
             3)
                 local new_password=$(openssl rand -hex 16)
@@ -3586,15 +6340,12 @@ modify_shadowtls_node() {
                 local new_stls_tag="shadowtls-in-${new_port}"
                 local new_ss_tag="shadowsocks-in-${new_port}"
                 local old_ss_tag="shadowsocks-in-${port}"
-                # Update shadowtls inbound tag, port, and detour
                 jq --arg old_tag "$tag" --arg new_tag "$new_stls_tag" --argjson new_port "$new_port" --arg new_ss_tag "$new_ss_tag" \
                     '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port | .detour = $new_ss_tag)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                # Update shadowsocks inbound tag and detour reference
                 jq --arg old_ss_tag "$old_ss_tag" --arg new_ss_tag "$new_ss_tag" \
                     '(.inbounds[] | select(.tag == $old_ss_tag)) |= (.tag = $new_ss_tag)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                # Update route rules
                 if jq -e '.route.rules' "${CONFIG_FILE}" >/dev/null 2>&1; then
                     jq --arg old_tag "$tag" --arg new_tag "$new_stls_tag" \
                         '(.route.rules[] | select(.inbound[]? == $old_tag)) |= (.inbound = [.inbound[] | if . == $old_tag then $new_tag else . end])' \
@@ -3655,49 +6406,49 @@ modify_shadowtls_node() {
     fi
 }
 
-# ==================== HTTPS 节点修改 ====================
-modify_https_node() {
+# ==================== Shadowsocks 节点修改 ====================
+modify_shadowsocks_node() {
     if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
         print_warning "当前没有可修改的节点"
         return 1
     fi
     
     echo ""
-    echo -e "${CYAN}当前 HTTPS 节点:${NC}"
-    local https_nodes=()
+    echo -e "${CYAN}当前 Shadowsocks 节点:${NC}"
+    local ss_nodes=()
     for i in "${!INBOUND_TAGS[@]}"; do
-        if [[ "${INBOUND_PROTOS[$i]}" == "HTTPS" ]]; then
-            https_nodes+=("$i")
-            echo -e "  ${GREEN}[${#https_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        if [[ "${INBOUND_PROTOS[$i]}" == "Shadowsocks" ]]; then
+            ss_nodes+=("$i")
+            echo -e "  ${GREEN}[${#ss_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
         fi
     done
     
-    if [[ ${#https_nodes[@]} -eq 0 ]]; then
-        print_warning "没有找到 HTTPS 节点"
+    if [[ ${#ss_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 Shadowsocks 节点"
         return 1
     fi
     
     read -p "请选择要修改的节点序号 (0 取消): " node_choice
     [[ "$node_choice" == "0" ]] && return 0
     local idx=$((node_choice-1))
-    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#https_nodes[@]} )); then
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#ss_nodes[@]} )); then
         print_error "序号无效"
         return 1
     fi
     
-    local array_idx="${https_nodes[$idx]}"
+    local array_idx="${ss_nodes[$idx]}"
     local tag="${INBOUND_TAGS[$array_idx]}"
     local port="${INBOUND_PORTS[$array_idx]}"
-    local current_sni="${INBOUND_SNIS[$array_idx]}"
+    local current_method=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).method // "2022-blake3-aes-128-gcm"' "${CONFIG_FILE}")
     
     config_changed=0
     
     while true; do
         echo ""
-        echo -e "${CYAN}修改 HTTPS 节点 ${tag}:${NC}"
+        echo -e "${CYAN}修改 Shadowsocks 节点 ${tag}:${NC}"
         echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
-        echo -e "  ${GREEN}[3]${NC} 重新生成 UUID"
+        echo -e "  ${GREEN}[2]${NC} 重新生成密码"
+        echo -e "  ${GREEN}[3]${NC} 修改加密方式 (当前: ${current_method})"
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
         
@@ -3715,7 +6466,7 @@ modify_https_node() {
                 if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
                     print_warning "端口 ${new_port} 已被占用"; continue
                 fi
-                local new_tag="vless-tls-in-${new_port}"
+                local new_tag="ss-${new_port}"
                 jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
                     '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
@@ -3732,28 +6483,37 @@ modify_https_node() {
                 print_success "端口已修改为 ${new_port}"
                 ;;
             2)
-                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
-                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
-                read -p "SNI: " new_sni
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
-                fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                local new_password=$(openssl rand -base64 32)
+                jq --arg tag "$tag" --arg password "$new_password" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.password = $password)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                gen_cert_for_sni "${new_sni}"
-                INBOUND_SNIS[$array_idx]="$new_sni"
-                current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                print_success "密码已重新生成: ${new_password}"
                 ;;
             3)
-                local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-                jq --arg tag "$tag" --arg uuid "$new_uuid" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].uuid = $uuid)' \
+                echo -e "${YELLOW}请选择加密方式${NC}"
+                echo -e "${CYAN}1) 2022-blake3-aes-128-gcm${NC}"
+                echo -e "${CYAN}2) 2022-blake3-aes-256-gcm${NC}"
+                echo -e "${CYAN}3) 2022-blake3-chacha20-poly1305${NC}"
+                echo -e "${CYAN}4) aes-256-gcm${NC}"
+                echo -e "${CYAN}5) aes-128-gcm${NC}"
+                echo -e "${CYAN}6) chacha20-ietf-poly1305${NC}"
+                read -p "加密方式 [${current_method}]: " new_method
+                case "$new_method" in
+                    1) new_method="2022-blake3-aes-128-gcm" ;;
+                    2) new_method="2022-blake3-aes-256-gcm" ;;
+                    3) new_method="2022-blake3-chacha20-poly1305" ;;
+                    4) new_method="aes-256-gcm" ;;
+                    5) new_method="aes-128-gcm" ;;
+                    6) new_method="chacha20-ietf-poly1305" ;;
+                    *) new_method="$current_method" ;;
+                esac
+                jq --arg tag "$tag" --arg method "$new_method" \
+                    '(.inbounds[] | select(.tag == $tag)).method = $method' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                current_method="$new_method"
                 config_changed=1
-                print_success "UUID 已重新生成: ${new_uuid}"
+                print_success "加密方式已修改为 ${new_method}"
                 ;;
             0)
                 break
@@ -3771,55 +6531,49 @@ modify_https_node() {
     fi
 }
 
-# ==================== AnyTLS 节点修改 ====================
-modify_anytls_node() {
+# ==================== SOCKS5 节点修改 ====================
+modify_socks5_node() {
     if [[ ${#INBOUND_TAGS[@]} -eq 0 ]]; then
         print_warning "当前没有可修改的节点"
         return 1
     fi
     
     echo ""
-    echo -e "${CYAN}当前 AnyTLS 节点:${NC}"
-    local anytls_nodes=()
+    echo -e "${CYAN}当前 SOCKS5 节点:${NC}"
+    local socks_nodes=()
     for i in "${!INBOUND_TAGS[@]}"; do
-        if [[ "${INBOUND_PROTOS[$i]}" == "AnyTLS" || "${INBOUND_PROTOS[$i]}" == "AnyTLS+REALITY" ]]; then
-            anytls_nodes+=("$i")
-            echo -e "  ${GREEN}[${#anytls_nodes[@]}]${NC} 协议: ${INBOUND_PROTOS[$i]}, 端口: ${INBOUND_PORTS[$i]}, SNI: ${INBOUND_SNIS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
+        if [[ "${INBOUND_PROTOS[$i]}" == "SOCKS5" ]]; then
+            socks_nodes+=("$i")
+            echo -e "  ${GREEN}[${#socks_nodes[@]}]${NC} 端口: ${INBOUND_PORTS[$i]}, TAG: ${INBOUND_TAGS[$i]}"
         fi
     done
     
-    if [[ ${#anytls_nodes[@]} -eq 0 ]]; then
-        print_warning "没有找到 AnyTLS 节点"
+    if [[ ${#socks_nodes[@]} -eq 0 ]]; then
+        print_warning "没有找到 SOCKS5 节点"
         return 1
     fi
     
     read -p "请选择要修改的节点序号 (0 取消): " node_choice
     [[ "$node_choice" == "0" ]] && return 0
     local idx=$((node_choice-1))
-    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#anytls_nodes[@]} )); then
+    if ! [[ "$node_choice" =~ ^[0-9]+$ ]] || (( idx < 0 || idx >= ${#socks_nodes[@]} )); then
         print_error "序号无效"
         return 1
     fi
     
-    local array_idx="${anytls_nodes[$idx]}"
+    local array_idx="${socks_nodes[$idx]}"
     local tag="${INBOUND_TAGS[$array_idx]}"
     local port="${INBOUND_PORTS[$array_idx]}"
-    local current_sni="${INBOUND_SNIS[$array_idx]}"
-    local proto="${INBOUND_PROTOS[$array_idx]}"
     
-    # 判断是否为 AnyTLS+REALITY 模式
-    local is_reality=0
-    if [[ "$proto" == "AnyTLS+REALITY" ]]; then
-        is_reality=1
-    fi
+    local current_user=$(jq -r --arg tag "$tag" '(.inbounds[] | select(.tag == $tag)).users[0].username // ""' "${CONFIG_FILE}")
     
     config_changed=0
     
     while true; do
         echo ""
-        echo -e "${CYAN}修改 ${proto} 节点 ${tag}:${NC}"
+        echo -e "${CYAN}修改 SOCKS5 节点 ${tag}:${NC}"
         echo -e "  ${GREEN}[1]${NC} 修改端口 (当前: ${port})"
-        echo -e "  ${GREEN}[2]${NC} 修改 SNI (当前: ${current_sni})"
+        echo -e "  ${GREEN}[2]${NC} 修改用户名 (当前: ${current_user:-无})"
         echo -e "  ${GREEN}[3]${NC} 重新生成密码"
         echo -e "  ${GREEN}[0]${NC} 返回"
         read -p "请选择: " mod_choice
@@ -3838,12 +6592,7 @@ modify_anytls_node() {
                 if check_port_in_use "$new_port" && [[ "$new_port" != "$port" ]]; then
                     print_warning "端口 ${new_port} 已被占用"; continue
                 fi
-                local new_tag
-                if [[ $is_reality -eq 1 ]]; then
-                    new_tag="anytls-reality-${new_port}"
-                else
-                    new_tag="anytls-in-${new_port}"
-                fi
+                local new_tag="socks-in-${new_port}"
                 jq --arg old_tag "$tag" --arg new_tag "$new_tag" --argjson new_port "$new_port" \
                     '(.inbounds[] | select(.tag == $old_tag)) |= (.tag = $new_tag | .listen_port = $new_port)' \
                     "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
@@ -3860,30 +6609,17 @@ modify_anytls_node() {
                 print_success "端口已修改为 ${new_port}"
                 ;;
             2)
-                echo -e "${YELLOW}新 SNI (留空随机)${NC}"
-                echo -e "${CYAN}例如: ${DEFAULT_SNI1}${NC}"
-                read -p "SNI: " new_sni
-                if [[ -z "$new_sni" ]]; then
-                    new_sni=$(get_random_sni)
+                echo -e "${YELLOW}新用户名 (留空随机生成)${NC}"
+                read -p "用户名: " new_user
+                if [[ -z "$new_user" ]]; then
+                    new_user="user_$(openssl rand -hex 4)"
                 fi
-                if [[ $is_reality -eq 1 ]]; then
-                    jq --arg tag "$tag" --arg sni "$new_sni" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                else
-                    jq --arg tag "$tag" --arg sni "$new_sni" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    gen_cert_for_sni "${new_sni}"
-                fi
-                INBOUND_SNIS[$array_idx]="$new_sni"
-                current_sni="$new_sni"
+                jq --arg tag "$tag" --arg user "$new_user" \
+                    '(.inbounds[] | select(.tag == $tag)) |= (.users[0].username = $user)' \
+                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                current_user="$new_user"
                 config_changed=1
-                if [[ $is_reality -eq 1 ]]; then
-                    print_success "SNI 已修改为 ${new_sni}，handshake.server 已同步更新"
-                else
-                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
-                fi
+                print_success "用户名已修改为 ${new_user}"
                 ;;
             3)
                 local new_password=$(openssl rand -hex 16)
@@ -4432,45 +7168,29 @@ show_result() {
 # ==================== 协议选择菜单 ====================
 show_menu() {
     show_banner
-    echo -e "${YELLOW}请选择要添加的协议节点:${NC}"
+    echo -e "${YELLOW}请选择协议类别:${NC}"
     echo ""
-    echo -e "${GREEN}[1]${NC} VlessReality ${CYAN}→ 抗审查最强，伪装真实TLS，无需证书${NC} ${YELLOW}(⭐ 强烈推荐)${NC}"
+    echo -e "${GREEN}[1]${NC} VLESS ${CYAN}→ REALITY / WS-TLS / H2-TLS / HTTPUpgrade-TLS / HTTP2-REALITY${NC}"
+    echo -e "${GREEN}[2]${NC} VMess ${CYAN}→ TCP / HTTP / QUIC / WS-TLS / H2-TLS / HTTPUpgrade-TLS${NC}"
+    echo -e "${GREEN}[3]${NC} Trojan ${CYAN}→ TLS / WS-TLS / H2-TLS / HTTPUpgrade-TLS${NC}"
+    echo -e "${GREEN}[4]${NC} Hysteria2 ${CYAN}→ 基于 QUIC 的高速协议${NC}"
+    echo -e "${GREEN}[5]${NC} TUIC ${CYAN}→ 基于 QUIC 的代理协议${NC}"
+    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用 TLS 协议${NC}"
+    echo -e "${GREEN}[7]${NC} Shadowsocks 2022 ${CYAN}→ 新版 SS 协议${NC}"
+    echo -e "${GREEN}[8]${NC} SOCKS5 ${CYAN}→ 代理协议${NC}"
     echo ""
-    echo -e "${GREEN}[2]${NC} Hysteria2 ${CYAN}→ 基于QUIC，速度快，垃圾线路专用${NC}"
-    echo ""
-    echo -e "${GREEN}[3]${NC} SOCKS5 ${CYAN}→ 适合中转的代理协议${NC}"
-    echo ""
-    echo -e "${GREEN}[4]${NC} ShadowTLS v3 ${CYAN}→ TLS流量伪装${NC}"
-    echo ""
-    echo -e "${GREEN}[5]${NC} HTTPS ${CYAN}→ 标准HTTPS，可过CDN${NC}"
-    echo ""
-    echo -e "${GREEN}[6]${NC} AnyTLS ${CYAN}→ 通用 TLS 协议，可启用 REALITY 伪装${NC}"
-    echo ""
-    read -p "选择 [1-6]: " choice
+    read -p "选择 [1-8]: " choice
     
     case $choice in
-        1)
-            setup_reality
-            ;;
-        2)
-            setup_hysteria2
-            ;;
-        3)
-            setup_socks5
-            ;;
-        4)
-            setup_shadowtls
-            ;;
-        5)
-            setup_https
-            ;;
-        6)
-            setup_anytls
-            ;;
-        *)
-            print_error "无效选项"
-            return 1
-            ;;
+        1) show_vless_menu ;;
+        2) show_vmess_menu ;;
+        3) show_trojan_menu ;;
+        4) setup_hysteria2 ;;
+        5) setup_tuic ;;
+        6) setup_anytls ;;
+        7) setup_shadowsocks ;;
+        8) setup_socks5 ;;
+        *) print_error "无效选项"; return 1 ;;
     esac
     
     if [[ -n "$INBOUNDS_JSON" ]]; then
@@ -4478,6 +7198,66 @@ show_menu() {
         start_svc || return 1
         show_result
     fi
+}
+
+show_vless_menu() {
+    echo ""
+    echo -e "${CYAN}VLESS 协议变体:${NC}"
+    echo -e "${GREEN}[1]${NC} VLESS-REALITY ${CYAN}→ 抗审查最强，伪装真实TLS，无需证书${NC} ${YELLOW}(⭐推荐)${NC}"
+    echo -e "${GREEN}[2]${NC} VLESS-WS-TLS ${CYAN}→ WebSocket + TLS，可过CDN${NC}"
+    echo -e "${GREEN}[3]${NC} VLESS-H2-TLS ${CYAN}→ HTTP/2 + TLS${NC}"
+    echo -e "${GREEN}[4]${NC} VLESS-HTTPUpgrade-TLS ${CYAN}→ HTTPUpgrade + TLS${NC}"
+    echo -e "${GREEN}[5]${NC} VLESS-HTTP2-REALITY ${CYAN}→ HTTP/2 + REALITY${NC}"
+    echo ""
+    read -p "选择 [1-5]: " vless_choice
+    case $vless_choice in
+        1) setup_vless_reality ;;
+        2) setup_vless_ws_tls ;;
+        3) setup_vless_h2_tls ;;
+        4) setup_vless_httpupgrade_tls ;;
+        5) setup_vless_http2_reality ;;
+        *) print_error "无效选项"; return 1 ;;
+    esac
+}
+
+show_vmess_menu() {
+    echo ""
+    echo -e "${CYAN}VMess 协议变体:${NC}"
+    echo -e "${GREEN}[1]${NC} VMess-TCP ${CYAN}→ 基础TCP传输${NC}"
+    echo -e "${GREEN}[2]${NC} VMess-HTTP ${CYAN}→ HTTP 伪装${NC}"
+    echo -e "${GREEN}[3]${NC} VMess-QUIC ${CYAN}→ QUIC 传输${NC}"
+    echo -e "${GREEN}[4]${NC} VMess-WS-TLS ${CYAN}→ WebSocket + TLS${NC}"
+    echo -e "${GREEN}[5]${NC} VMess-H2-TLS ${CYAN}→ HTTP/2 + TLS${NC}"
+    echo -e "${GREEN}[6]${NC} VMess-HTTPUpgrade-TLS ${CYAN}→ HTTPUpgrade + TLS${NC}"
+    echo ""
+    read -p "选择 [1-6]: " vmess_choice
+    case $vmess_choice in
+        1) setup_vmess_tcp ;;
+        2) setup_vmess_http ;;
+        3) setup_vmess_quic ;;
+        4) setup_vmess_ws_tls ;;
+        5) setup_vmess_h2_tls ;;
+        6) setup_vmess_httpupgrade_tls ;;
+        *) print_error "无效选项"; return 1 ;;
+    esac
+}
+
+show_trojan_menu() {
+    echo ""
+    echo -e "${CYAN}Trojan 协议变体:${NC}"
+    echo -e "${GREEN}[1]${NC} Trojan-TLS ${CYAN}→ 标准 TLS${NC}"
+    echo -e "${GREEN}[2]${NC} Trojan-WS-TLS ${CYAN}→ WebSocket + TLS${NC}"
+    echo -e "${GREEN}[3]${NC} Trojan-H2-TLS ${CYAN}→ HTTP/2 + TLS${NC}"
+    echo -e "${GREEN}[4]${NC} Trojan-HTTPUpgrade-TLS ${CYAN}→ HTTPUpgrade + TLS${NC}"
+    echo ""
+    read -p "选择 [1-4]: " trojan_choice
+    case $trojan_choice in
+        1) setup_trojan_tls ;;
+        2) setup_trojan_ws_tls ;;
+        3) setup_trojan_h2_tls ;;
+        4) setup_trojan_httpupgrade_tls ;;
+        *) print_error "无效选项"; return 1 ;;
+    esac
 }
 # ==================== 主菜单 ====================
 show_main_menu() {
@@ -4641,23 +7421,29 @@ modify_node_menu() {
     
     echo ""
     echo -e "${CYAN}请选择要修改的节点类型:${NC}"
-    echo -e "  ${GREEN}[1]${NC} Reality 节点"
-    echo -e "  ${GREEN}[2]${NC} Hysteria2 节点"
-    echo -e "  ${GREEN}[3]${NC} SOCKS5 节点"
-    echo -e "  ${GREEN}[4]${NC} ShadowTLS 节点"
-    echo -e "  ${GREEN}[5]${NC} HTTPS 节点"
-    echo -e "  ${GREEN}[6]${NC} AnyTLS 节点"
-    echo -e "  ${GREEN}[0]${NC} 返回"
+    echo -e "${GREEN}[1]${NC} VLESS 节点"
+    echo -e "${GREEN}[2]${NC} VMess 节点"
+    echo -e "${GREEN}[3]${NC} Trojan 节点"
+    echo -e "${GREEN}[4]${NC} Hysteria2 节点"
+    echo -e "${GREEN}[5]${NC} TUIC 节点"
+    echo -e "${GREEN}[6]${NC} AnyTLS 节点"
+    echo -e "${GREEN}[7]${NC} ShadowTLS 节点"
+    echo -e "${GREEN}[8]${NC} Shadowsocks 节点"
+    echo -e "${GREEN}[9]${NC} SOCKS5 节点"
+    echo -e "${GREEN}[0]${NC} 返回"
     echo ""
     read -p "请选择: " mod_type
     
     case $mod_type in
-        1) modify_reality_node ;;
-        2) modify_hysteria2_node ;;
-        3) modify_socks5_node ;;
-        4) modify_shadowtls_node ;;
-        5) modify_https_node ;;
+        1) modify_vless_node ;;
+        2) modify_vmess_node ;;
+        3) modify_trojan_node ;;
+        4) modify_hysteria2_node ;;
+        5) modify_tuic_node ;;
         6) modify_anytls_node ;;
+        7) modify_shadowtls_node ;;
+        8) modify_shadowsocks_node ;;
+        9) modify_socks5_node ;;
         0) return 0 ;;
         *) print_error "无效选项" ;;
     esac
