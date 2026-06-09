@@ -4670,6 +4670,75 @@ parse_anytls_link() {
     print_success "AnyTLS 中转已添加: ${relay_desc}"
 }
 
+parse_tuic_link() {
+    local link="$1"
+    local custom_desc="$2"
+    local data=$(echo "$link" | sed 's|tuic://||')
+    local userinfo=$(echo "$data" | cut -d'@' -f1)
+    local uuid=$(echo "$userinfo" | cut -d':' -f1)
+    local password=$(echo "$userinfo" | cut -d':' -f2)
+    local server_port_params=$(echo "$data" | cut -d'@' -f2)
+    local server=$(echo "$server_port_params" | cut -d':' -f1)
+    local port_params=$(echo "$server_port_params" | cut -d':' -f2)
+    local port=$(echo "$port_params" | cut -d'?' -f1 | sed 's|/.*||')
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        print_error "端口无效: ${port}"
+        return 1
+    fi
+
+    local params=$(echo "$server_port_params" | grep -o '?.*' | sed 's|?||' | cut -d'#' -f1)
+    local sni=""
+    local congestion="cubic"
+    local insecure="false"
+
+    if [[ -n "$params" ]]; then
+        IFS='&' read -ra param_pairs <<< "$params"
+        for pair in "${param_pairs[@]}"; do
+            key="${pair%%=*}"
+            value="${pair#*=}"
+            case "$key" in
+                sni) sni="$value" ;;
+                congestion_control) congestion="$value" ;;
+                allowInsecure|insecure) insecure="$value" ;;
+            esac
+        done
+    fi
+
+    local insecure_bool="false"
+    [[ "$insecure" == "1" || "$insecure" == "true" ]] && insecure_bool="true"
+
+    local tag="relay-tuic-${#RELAY_TAGS[@]}"
+    local relay_json="{
+  \"type\": \"tuic\",
+  \"tag\": \"${tag}\",
+  \"server\": \"${server}\",
+  \"server_port\": ${port},
+  \"uuid\": \"${uuid}\",
+  \"password\": \"${password}\",
+  \"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${sni}\",
+    \"insecure\": ${insecure_bool},
+    \"alpn\": [\"h3\"]
+  },
+  \"congestion_control\": \"${congestion}\"
+}"
+
+    local relay_desc
+    if [[ -n "$custom_desc" ]]; then
+        relay_desc="$custom_desc"
+    else
+        relay_desc="TUIC ${server}:${port} (SNI: ${sni})"
+    fi
+
+    RELAY_TAGS+=("$tag")
+    RELAY_JSONS+=("$relay_json")
+    RELAY_DESCS+=("$relay_desc")
+
+    save_relays_to_file
+    print_success "TUIC 中转已添加: ${relay_desc}"
+}
+
 setup_relay() {
     # 加载中转配置和分流规则
     load_relays_from_file
@@ -4754,6 +4823,11 @@ setup_relay() {
                 echo -e "   ${CYAN}示例:${NC}"
                 echo -e "     anytls://password@1.2.3.4:443?insecure=1&sni=example.com"
                 echo ""
+                echo -e "${GREEN}9. TUIC${NC}"
+                echo -e "   ${YELLOW}格式:${NC} tuic://UUID:密码@服务器:端口?参数"
+                echo -e "   ${CYAN}示例:${NC}"
+                echo -e "     tuic://uuid:password@1.2.3.4:443?sni=example.com&congestion_control=cubic&allowInsecure=1"
+                echo ""
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
                 echo -e "${YELLOW}提示:${NC} 直接粘贴完整的节点分享链接即可，脚本会自动识别协议类型"
                 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -4780,6 +4854,8 @@ setup_relay() {
                         parse_trojan_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
                         parse_hysteria2_link "$RELAY_LINK" "$custom_desc"
+                    elif [[ "$RELAY_LINK" =~ ^tuic:// ]]; then
+                        parse_tuic_link "$RELAY_LINK" "$custom_desc"
                     elif [[ "$RELAY_LINK" =~ ^anytls:// ]]; then
                         parse_anytls_link "$RELAY_LINK"
                     else
@@ -5025,6 +5101,8 @@ setup_relay() {
                     parse_trojan_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
                 elif [[ "$NEW_RELAY_LINK" =~ ^(hy2|hysteria2):// ]]; then
                     parse_hysteria2_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
+                elif [[ "$NEW_RELAY_LINK" =~ ^tuic:// ]]; then
+                    parse_tuic_link "$NEW_RELAY_LINK" "$new_custom_desc" && parse_ok=1
                 elif [[ "$NEW_RELAY_LINK" =~ ^anytls:// ]]; then
                     parse_anytls_link "$NEW_RELAY_LINK" && parse_ok=1
                 else
