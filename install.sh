@@ -78,6 +78,13 @@ SOCKS_PASS=""
 DEFAULT_SNI="www.oracle.com"
 DEFAULT_SNI1="www.oracle.com,www.mozilla.org"
 
+# ACME 证书配置
+ACME_EMAIL=""
+# 每个节点的证书模式: "selfsign" 或 "acme"
+INBOUND_CERT_MODES=()
+# ACME 域名列表（用于生成 certificate_providers）
+ACME_DOMAINS=()
+
 # Alpine 标记
 ALPINE=0
 
@@ -414,6 +421,38 @@ gen_cert_for_sni() {
     print_success "证书生成完成 (${sni}, 有效期100年)"
 }
 
+# 询问证书模式：自签证书 或 ACME自动签证书
+# 返回值通过全局变量 ASK_CERT_MODE_RESULT
+ask_cert_mode() {
+    local sni="$1"
+    ASK_CERT_MODE_RESULT="selfsign"
+    
+    echo -e "${YELLOW}请选择证书模式:${NC}"
+    echo -e "${GREEN}[1]${NC} 自签证书 ${CYAN}(无需域名，客户端需跳过证书验证)${NC}"
+    echo -e "${GREEN}[2]${NC} ACME 自动签证书 ${CYAN}(需要域名指向本服务器，Let's Encrypt 免费证书)${NC}"
+    read -p "请选择 [1-2, 默认1]: " cert_choice
+    case "$cert_choice" in
+        2)
+            ASK_CERT_MODE_RESULT="acme"
+            # 输入 ACME 邮箱（如果还没设置过）
+            if [[ -z "${ACME_EMAIL}" ]]; then
+                echo -e "${YELLOW}请输入 ACME 邮箱（用于 Let's Encrypt 证书申请）${NC}"
+                read -p "邮箱: " ACME_EMAIL
+                if [[ -z "${ACME_EMAIL}" ]]; then
+                    ACME_EMAIL="singbox@${sni}"
+                    print_info "使用默认邮箱: ${ACME_EMAIL}"
+                fi
+            fi
+            print_info "证书模式: ACME (Let's Encrypt)"
+            print_warning "请确保域名 ${sni} 已解析到本服务器 IP，且 80/443 端口可访问"
+            ;;
+        *)
+            ASK_CERT_MODE_RESULT="selfsign"
+            print_info "证书模式: 自签证书"
+            ;;
+    esac
+}
+
 # ==================== 密钥管理 ====================
 gen_keys() {
     print_info "生成 Reality 密钥对..."
@@ -503,6 +542,8 @@ load_inbounds_from_config() {
     INBOUND_PROTOS=()
     INBOUND_SNIS=()
     INBOUND_RELAY_TAGS=()
+    INBOUND_CERT_MODES=()
+    ACME_DOMAINS=()
     INBOUNDS_JSON=""
     
     local inbounds_count=$(jq '.inbounds | length' "${CONFIG_FILE}" 2>/dev/null || echo "0")
@@ -612,14 +653,28 @@ load_inbounds_from_config() {
         
         [[ -z "$sni" ]] && sni="${DEFAULT_SNI}"
         
+        # 检测证书模式
+        local has_cert_provider=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+        local cert_mode="selfsign"
+        if [[ -n "$has_cert_provider" ]]; then
+            cert_mode="acme"
+            ACME_DOMAINS+=("${sni}")
+        fi
+        
         INBOUND_TAGS+=("$tag")
         INBOUND_PORTS+=("$port")
         INBOUND_PROTOS+=("$proto")
         INBOUND_SNIS+=("$sni")
         INBOUND_RELAY_TAGS+=("direct")  # 默认直连，稍后从路由规则更新
+        INBOUND_CERT_MODES+=("$cert_mode")
     done
     
     INBOUNDS_JSON="$inbound_list"
+    
+    # 从配置文件恢复 ACME 邮箱
+    if [[ ${#ACME_DOMAINS[@]} -gt 0 && -z "${ACME_EMAIL}" ]]; then
+        ACME_EMAIL=$(jq -r '.certificate_providers[0].email // ""' "${CONFIG_FILE}" 2>/dev/null)
+    fi
     
     # 从路由规则中恢复每个节点的默认中转（查找针对该入站且没有域名/IP条件的规则）
     # 注意：路由规则中可能有多个匹配该入站，需要找到最后一条没有域名/IP的规则作为默认
@@ -778,7 +833,10 @@ regenerate_links_from_config() {
                         # TLS variants (WS/H2/HTTPUpgrade or plain TLS)
                         if [[ -n "$uuid" ]]; then
                             local proto_label="VLESS-WS-TLS"
-                            local link_params="encryption=none&security=tls&sni=${sni}&allowInsecure=1"
+                            local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                            local allow_insecure_param=""
+                            [[ -z "$has_acme" ]] && allow_insecure_param="&allowInsecure=1"
+                            local link_params="encryption=none&security=tls&sni=${sni}${allow_insecure_param}"
                             
                             if [[ -n "$transport_type" ]]; then
                                 local transport_path=$(echo "$inbound" | jq -r '.transport.path // ""' 2>/dev/null)
@@ -866,7 +924,12 @@ regenerate_links_from_config() {
                     esac
                     
                     # Build VMess JSON for base64
-                    local vmess_json="{\"v\":\"2\",\"ps\":\"${proto_label}-${SERVER_IP}\",\"add\":\"${SERVER_IP}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",\"alpn\":\"\"}"
+                    local vmess_allow_insecure=""
+                    if [[ "$tls_enabled" == "true" ]]; then
+                        local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                        [[ -z "$has_acme" ]] && vmess_allow_insecure="\"allowInsecure\":\"1\","
+                    fi
+                    local vmess_json="{\"v\":\"2\",\"ps\":\"${proto_label}-${SERVER_IP}\",\"add\":\"${SERVER_IP}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",${vmess_allow_insecure}\"alpn\":\"\"}"
                     local vmess_base64=$(echo -n "$vmess_json" | base64 -w0)
                     
                     # IPv4
@@ -875,7 +938,7 @@ regenerate_links_from_config() {
                     
                     # IPv6
                     if [[ -n "${SERVER_IPV6}" ]]; then
-                        local vmess_json_v6="{\"v\":\"2\",\"ps\":\"${proto_label}-[${SERVER_IPV6}]\",\"add\":\"${SERVER_IPV6}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",\"alpn\":\"\"}"
+                        local vmess_json_v6="{\"v\":\"2\",\"ps\":\"${proto_label}-[${SERVER_IPV6}]\",\"add\":\"${SERVER_IPV6}\",\"port\":\"${port}\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"${type_param}\",\"type\":\"none\",\"host\":\"${sni}\",\"path\":\"${path_param}\",\"tls\":\"${security}\",\"sni\":\"${sni}\",${vmess_allow_insecure}\"alpn\":\"\"}"
                         local vmess_base64_v6=$(echo -n "$vmess_json_v6" | base64 -w0)
                         local link_ipv6="vmess://${vmess_base64_v6}"
                         add_link "$link_ipv6" "$proto_label" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
@@ -892,20 +955,23 @@ regenerate_links_from_config() {
                 
                 if [[ -n "$password" ]]; then
                     local proto_label="Trojan-TLS"
-                    local link_params="security=tls&sni=${sni}&type=tcp&allowInsecure=1"
+                    local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                    local allow_insecure_param=""
+                    [[ -z "$has_acme" ]] && allow_insecure_param="&allowInsecure=1"
+                    local link_params="security=tls&sni=${sni}&type=tcp${allow_insecure_param}"
                     
                     case "$transport_type" in
                         ws)
                             proto_label="Trojan-WS-TLS"
-                            link_params="security=tls&sni=${sni}&type=ws&path=${transport_path}&allowInsecure=1"
+                            link_params="security=tls&sni=${sni}&type=ws&path=${transport_path}${allow_insecure_param}"
                             ;;
                         http)
                             proto_label="Trojan-H2-TLS"
-                            link_params="security=tls&sni=${sni}&type=h2&path=${transport_path}&allowInsecure=1"
+                            link_params="security=tls&sni=${sni}&type=h2&path=${transport_path}${allow_insecure_param}"
                             ;;
                         httpupgrade)
                             proto_label="Trojan-HTTPUpgrade-TLS"
-                            link_params="security=tls&sni=${sni}&type=httpupgrade&path=${transport_path}&allowInsecure=1"
+                            link_params="security=tls&sni=${sni}&type=httpupgrade&path=${transport_path}${allow_insecure_param}"
                             ;;
                     esac
                     
@@ -930,12 +996,15 @@ regenerate_links_from_config() {
                 
                 if [[ -n "$uuid" && -n "$password" ]]; then
                     # IPv4
-                    local link_ipv4="tuic://${uuid}:${password}@${SERVER_IP}:${port}?sni=${sni}&congestion_control=${congestion}&allowInsecure=1#TUIC-${SERVER_IP}"
+                    local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                    local allow_insecure_param=""
+                    [[ -z "$has_acme" ]] && allow_insecure_param="&allowInsecure=1"
+                    local link_ipv4="tuic://${uuid}:${password}@${SERVER_IP}:${port}?sni=${sni}&congestion_control=${congestion}${allow_insecure_param}#TUIC-${SERVER_IP}"
                     add_link "$link_ipv4" "TUIC" "" "${SERVER_IP}" "${port}" "${sni}"
                     
                     # IPv6
                     if [[ -n "${SERVER_IPV6}" ]]; then
-                        local link_ipv6="tuic://${uuid}:${password}@[${SERVER_IPV6}]:${port}?sni=${sni}&congestion_control=${congestion}&allowInsecure=1#TUIC-[${SERVER_IPV6}]"
+                        local link_ipv6="tuic://${uuid}:${password}@[${SERVER_IPV6}]:${port}?sni=${sni}&congestion_control=${congestion}${allow_insecure_param}#TUIC-[${SERVER_IPV6}]"
                         add_link "$link_ipv6" "TUIC" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
                     fi
                 fi
@@ -977,7 +1046,10 @@ regenerate_links_from_config() {
                     fi
                     
                     # IPv4 链接
-                    local link_ipv4="hysteria2://${password}@${SERVER_IP}:${port_part}?insecure=1&sni=${sni}"
+                    local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                    local insecure_param=""
+                    [[ -z "$has_acme" ]] && insecure_param="insecure=1&"
+                    local link_ipv4="hysteria2://${password}@${SERVER_IP}:${port_part}?${insecure_param}sni=${sni}"
                     if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
                         link_ipv4="${link_ipv4}&obfs=salamander&obfs-password=${obfs_password}"
                     fi
@@ -986,7 +1058,7 @@ regenerate_links_from_config() {
                     
                     # IPv6 链接（如果有）
                     if [[ -n "${SERVER_IPV6}" ]]; then
-                        local link_ipv6="hysteria2://${password}@[${SERVER_IPV6}]:${port_part}?insecure=1&sni=${sni}"
+                        local link_ipv6="hysteria2://${password}@[${SERVER_IPV6}]:${port_part}?${insecure_param}sni=${sni}"
                         if [[ "$obfs_type" == "salamander" && -n "$obfs_password" ]]; then
                             link_ipv6="${link_ipv6}&obfs=salamander&obfs-password=${obfs_password}"
                         fi
@@ -1186,12 +1258,15 @@ EOFCLIENT
                     else
                         # AnyTLS (TLS)
                         # IPv4 链接
-                        local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
+                        local has_acme=$(echo "$inbound" | jq -r '.tls.certificate_provider // ""' 2>/dev/null)
+                        local insecure_param="insecure=1&"
+                        [[ -n "$has_acme" ]] && insecure_param=""
+                        local link_ipv4="anytls://${password}@${SERVER_IP}:${port}?security=tls&fp=chrome&${insecure_param}sni=${sni}&type=tcp#AnyTLS-${SERVER_IP}"
                         add_link "$link_ipv4" "AnyTLS" "" "${SERVER_IP}" "${port}" "${sni}"
                         
                         # IPv6 链接（如果有）
                         if [[ -n "${SERVER_IPV6}" ]]; then
-                            local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=tls&fp=chrome&insecure=1&sni=${sni}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
+                            local link_ipv6="anytls://${password}@[${SERVER_IPV6}]:${port}?security=tls&fp=chrome&${insecure_param}sni=${sni}&type=tcp#AnyTLS-[${SERVER_IPV6}]"
                             add_link "$link_ipv6" "AnyTLS" "" "[${SERVER_IPV6}]" "${port}" "${sni}"
                         fi
                     fi
@@ -1631,6 +1706,10 @@ setup_hysteria2() {
     read -p "SNI域名 [${DEFAULT_SNI}]: " HY2_SNI
     HY2_SNI=${HY2_SNI:-${DEFAULT_SNI}}
     
+    # 证书模式选择
+    ask_cert_mode "${HY2_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+    
     # 是否启用 Salamander 混淆
     read -p "是否启用 Salamander 混淆？(y/N): " ENABLE_OBFS
     ENABLE_OBFS=${ENABLE_OBFS:-N}
@@ -1643,8 +1722,25 @@ setup_hysteria2() {
         print_info "混淆密码: ${OBFS_PASSWORD}"
     fi
     
-    print_info "为 ${HY2_SNI} 生成自签证书..."
-    gen_cert_for_sni "${HY2_SNI}"
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${HY2_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${HY2_SNI}\",
+    \"alpn\": [\"h3\"],
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        gen_cert_for_sni "${HY2_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${HY2_SNI}\",
+    \"alpn\": [\"h3\"],
+    \"certificate_path\": \"${CERT_DIR}/${HY2_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${HY2_SNI}/private.key\"
+  }"
+    fi
     
     print_info "生成配置文件..."
     
@@ -1669,13 +1765,7 @@ setup_hysteria2() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"users\": [{\"password\": \"${NODE_HY2_PASSWORD}\"}],
-  \"tls\": {
-    \"enabled\": true,
-    \"alpn\": [\"h3\"],
-    \"server_name\": \"${HY2_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${HY2_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${HY2_SNI}/private.key\"
-  }${obfs_config}
+  ${tls_config}${obfs_config}
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -1685,13 +1775,17 @@ setup_hysteria2() {
     fi
     
     PROTO="Hysteria2"
-    EXTRA_INFO="密码: ${NODE_HY2_PASSWORD}\n证书: 自签证书(${HY2_SNI})\nSNI: ${HY2_SNI}"
+    EXTRA_INFO="密码: ${NODE_HY2_PASSWORD}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME证书(${HY2_SNI})" || echo "自签证书(${HY2_SNI})")\nSNI: ${HY2_SNI}"
     if [[ "$ENABLE_OBFS" =~ ^[Yy]$ ]]; then
         EXTRA_INFO="${EXTRA_INFO}\nSalamander混淆: 已启用 (密码: ${OBFS_PASSWORD})"
     fi
     
     # 保存新添加节点的链接（只用于显示）
     CURRENT_NEW_LINKS=""
+    
+    # 根据证书模式决定是否添加 insecure
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&insecure=1&allowInsecure=1"
     
     # 计算证书指纹（pinSHA256）
     local cert_pin=""
@@ -1700,7 +1794,7 @@ setup_hysteria2() {
     fi
 
     # IPv4 链接
-    local link_ipv4="hysteria2://${NODE_HY2_PASSWORD}@${SERVER_IP}:${PORT}?alpn=h3&insecure=1&allowInsecure=1&sni=${HY2_SNI}"
+    local link_ipv4="hysteria2://${NODE_HY2_PASSWORD}@${SERVER_IP}:${PORT}?alpn=h3${allow_insecure}&sni=${HY2_SNI}"
     if [[ -n "$cert_pin" ]]; then
         link_ipv4="${link_ipv4}&pinSHA256=${cert_pin}"
     fi
@@ -1716,7 +1810,7 @@ setup_hysteria2() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="hysteria2://${NODE_HY2_PASSWORD}@[${SERVER_IPV6}]:${PORT}?alpn=h3&insecure=1&allowInsecure=1&sni=${HY2_SNI}"
+        local link_ipv6="hysteria2://${NODE_HY2_PASSWORD}@[${SERVER_IPV6}]:${PORT}?alpn=h3${allow_insecure}&sni=${HY2_SNI}"
         if [[ -n "$cert_pin" ]]; then
             link_ipv6="${link_ipv6}&pinSHA256=${cert_pin}"
         fi
@@ -1733,6 +1827,7 @@ setup_hysteria2() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${HY2_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
     
     print_success "Hysteria2 配置完成 (SNI: ${HY2_SNI})"
     save_links_to_files
@@ -2102,6 +2197,10 @@ setup_vless_ws_tls() {
         print_info "随机SNI: ${NODE_SNI}"
     fi
     
+    # 证书模式选择
+    ask_cert_mode "${NODE_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+    
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
@@ -2118,9 +2217,25 @@ setup_vless_ws_tls() {
     fi
     print_info "WS 路径: ${NODE_PATH}"
     
-    # 生成自签证书
-    print_info "为 ${NODE_SNI} 生成自签证书..."
-    gen_cert_for_sni "${NODE_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${NODE_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        print_info "为 ${NODE_SNI} 生成自签证书..."
+        gen_cert_for_sni "${NODE_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }"
+    fi
     
     print_info "生成配置文件..."
     
@@ -2137,12 +2252,7 @@ setup_vless_ws_tls() {
     \"headers\": {\"host\": \"${NODE_SNI}\"},
     \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${NODE_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
     
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2152,12 +2262,14 @@ setup_vless_ws_tls() {
     fi
     
     PROTO="VLESS-WS-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\nWS路径: ${NODE_PATH}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\nWS路径: ${NODE_PATH}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-${SERVER_IP}"
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-WS-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2165,7 +2277,7 @@ setup_vless_ws_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-WS-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=ws&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-WS-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-WS-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-WS-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2175,6 +2287,7 @@ setup_vless_ws_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
     
     print_success "VLESS-WS-TLS 配置完成 (SNI: ${NODE_SNI})"
     save_links_to_files
@@ -2212,6 +2325,10 @@ setup_vless_h2_tls() {
         print_info "随机SNI: ${NODE_SNI}"
     fi
     
+    # 证书模式选择
+    ask_cert_mode "${NODE_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+    
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
@@ -2228,9 +2345,25 @@ setup_vless_h2_tls() {
     fi
     print_info "H2 路径: ${NODE_PATH}"
     
-    # 生成自签证书
-    print_info "为 ${NODE_SNI} 生成自签证书..."
-    gen_cert_for_sni "${NODE_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${NODE_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        print_info "为 ${NODE_SNI} 生成自签证书..."
+        gen_cert_for_sni "${NODE_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }"
+    fi
     
     print_info "生成配置文件..."
     
@@ -2246,12 +2379,7 @@ setup_vless_h2_tls() {
     \"path\": \"${NODE_PATH}\",
     \"headers\": {\"host\": \"${NODE_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${NODE_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2261,12 +2389,14 @@ setup_vless_h2_tls() {
     fi
 
     PROTO="VLESS-H2-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\nH2路径: ${NODE_PATH}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-${SERVER_IP}"
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-H2-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2274,7 +2404,7 @@ setup_vless_h2_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-H2-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=h2&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-H2-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-H2-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-H2-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2284,6 +2414,7 @@ setup_vless_h2_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
     
     print_success "VLESS-H2-TLS 配置完成 (SNI: ${NODE_SNI})"
     save_links_to_files
@@ -2321,6 +2452,10 @@ setup_vless_httpupgrade_tls() {
         print_info "随机SNI: ${NODE_SNI}"
     fi
     
+    # 证书模式选择
+    ask_cert_mode "${NODE_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+    
     # UUID（自动随机）
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
@@ -2337,9 +2472,25 @@ setup_vless_httpupgrade_tls() {
     fi
     print_info "路径: ${NODE_PATH}"
     
-    # 生成自签证书
-    print_info "为 ${NODE_SNI} 生成自签证书..."
-    gen_cert_for_sni "${NODE_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${NODE_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        print_info "为 ${NODE_SNI} 生成自签证书..."
+        gen_cert_for_sni "${NODE_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${NODE_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
+  }"
+    fi
     
     print_info "生成配置文件..."
     
@@ -2355,12 +2506,7 @@ setup_vless_httpupgrade_tls() {
     \"path\": \"${NODE_PATH}\",
     \"headers\": {\"host\": \"${NODE_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${NODE_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${NODE_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${NODE_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -2370,12 +2516,14 @@ setup_vless_httpupgrade_tls() {
     fi
 
     PROTO="VLESS-HTTPUpgrade-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: 自签证书(${NODE_SNI})\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${NODE_SNI})" || echo "自签证书(${NODE_SNI})")\nSNI: ${NODE_SNI}\n路径: ${NODE_PATH}"
     
     CURRENT_NEW_LINKS=""
     
     # IPv4 链接
-    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+    local link_ipv4="vless://${NODE_UUID}@${SERVER_IP}:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${NODE_SNI}"
     LINK="$link_ipv4"
     
@@ -2383,7 +2531,7 @@ setup_vless_httpupgrade_tls() {
     
     # IPv6 链接（如果有）
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}&allowInsecure=1#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="vless://${NODE_UUID}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&sni=${NODE_SNI}&type=httpupgrade&host=${NODE_SNI}&path=${NODE_PATH}${allow_insecure}#VLESS-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "VLESS-HTTPUpgrade-TLS" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${NODE_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[VLESS-HTTPUpgrade-TLS] [${SERVER_IPV6}]:${PORT} (SNI: ${NODE_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -2393,6 +2541,7 @@ setup_vless_httpupgrade_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${NODE_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
     
     print_success "VLESS-HTTPUpgrade-TLS 配置完成 (SNI: ${NODE_SNI})"
     save_links_to_files
@@ -2513,6 +2662,13 @@ setup_anytls() {
     read -p "SNI 域名 [${DEFAULT_SNI}]: " ANYTLS_SNI
     ANYTLS_SNI=${ANYTLS_SNI:-${DEFAULT_SNI}}
 
+    # 证书模式选择（仅 TLS 模式需要）
+    local NODE_CERT_MODE="selfsign"
+    if [[ ! "$ENABLE_REALITY" =~ ^[Yy]$ ]]; then
+        ask_cert_mode "${ANYTLS_SNI}"
+        NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+    fi
+
     # 每个节点使用独立密码
     local NODE_ANYTLS_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_ANYTLS_PASSWORD}"
@@ -2529,13 +2685,7 @@ setup_anytls() {
         print_info "REALITY 公钥: ${REALITY_PUBLIC}"
         print_info "Short ID: ${SHORT_ID}"
     else
-        # 纯 AnyTLS 需要自签证书
-        gen_cert_for_sni "${ANYTLS_SNI}"
-        # 询问是否允许不安全连接
-        echo -e "${YELLOW}是否允许跳过证书验证（insecure）？${NC}"
-        echo -e "${CYAN}允许可以简化客户端配置，但会降低安全性（中间人攻击风险）${NC}"
-        read -p "允许 insecure? [y/N]: " ALLOW_INSECURE
-        ALLOW_INSECURE=${ALLOW_INSECURE:-N}
+        : # 纯 AnyTLS 证书逻辑在下方处理
     fi
 
     # 询问 uTLS 指纹（可选）
@@ -2639,9 +2789,33 @@ EOF
         LINK="请使用 sing-box 客户端，配置文件已保存到: ${CLIENT_JSON_PATH}"
     else
         # 纯 AnyTLS 入站（需要证书）
+        local tls_config_anytls=""
+        if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+            ACME_DOMAINS+=("${ANYTLS_SNI}")
+            tls_config_anytls="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${ANYTLS_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+        else
+            gen_cert_for_sni "${ANYTLS_SNI}"
+            tls_config_anytls="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${ANYTLS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${ANYTLS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${ANYTLS_SNI}/private.key\"
+  }"
+        fi
         local insecure_bool="false"
-        if [[ "$ALLOW_INSECURE" =~ ^[Yy]$ ]]; then
-            insecure_bool="true"
+        if [[ "${NODE_CERT_MODE}" == "selfsign" ]]; then
+            # 自签证书，询问是否允许不安全连接
+            echo -e "${YELLOW}是否允许跳过证书验证（insecure）？${NC}"
+            echo -e "${CYAN}允许可以简化客户端配置，但会降低安全性（中间人攻击风险）${NC}"
+            read -p "允许 insecure? [y/N]: " ALLOW_INSECURE
+            ALLOW_INSECURE=${ALLOW_INSECURE:-N}
+            if [[ "$ALLOW_INSECURE" =~ ^[Yy]$ ]]; then
+                insecure_bool="true"
+            fi
         fi
         inbound="{
   \"type\": \"anytls\",
@@ -2650,16 +2824,11 @@ EOF
   \"listen_port\": ${PORT},
   \"users\": [{\"password\": \"${NODE_ANYTLS_PASSWORD}\"}],
   \"padding_scheme\": ${padding_config},
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${ANYTLS_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${ANYTLS_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${ANYTLS_SNI}/private.key\"
-  }
+  ${tls_config_anytls}
 }"
         PROTO="AnyTLS"
-        EXTRA_INFO="密码: ${NODE_ANYTLS_PASSWORD}\n证书: 自签证书 (${ANYTLS_SNI})"
-        # 生成 anytls:// 链接，insecure 根据用户选择
+        EXTRA_INFO="密码: ${NODE_ANYTLS_PASSWORD}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME证书 (${ANYTLS_SNI})" || echo "自签证书 (${ANYTLS_SNI})")"
+        # 生成 anytls:// 链接，insecure 根据证书模式
         LINK="anytls://${NODE_ANYTLS_PASSWORD}@${SERVER_IP}:${PORT}?security=tls&fp=${UTLS_FINGERPRINT}&insecure=${insecure_bool}&sni=${ANYTLS_SNI}&type=tcp#AnyTLS-${SERVER_IP}"
     fi
 
@@ -2676,6 +2845,7 @@ EOF
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${ANYTLS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     # 显示新添加节点的信息（不再调用 add_link 传入无效链接）
     CURRENT_NEW_LINKS=""
@@ -3027,6 +3197,10 @@ setup_vmess_ws_tls() {
         print_info "随机SNI: ${VMESS_WS_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${VMESS_WS_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
 
@@ -3038,9 +3212,24 @@ setup_vmess_ws_tls() {
         print_info "随机 WS Path: ${WS_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${VMESS_WS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${VMESS_WS_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${VMESS_WS_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_WS_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        gen_cert_for_sni "${VMESS_WS_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_WS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3058,12 +3247,7 @@ setup_vmess_ws_tls() {
     \"headers\": {\"host\": \"${VMESS_WS_SNI}\"},
     \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${VMESS_WS_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${VMESS_WS_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3073,12 +3257,15 @@ setup_vmess_ws_tls() {
     fi
 
     PROTO="VMess-WS-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nWS Path: ${WS_PATH}\n证书: 自签证书(${VMESS_WS_SNI})\nSNI: ${VMESS_WS_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nWS Path: ${WS_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_WS_SNI})" || echo "自签证书(${VMESS_WS_SNI})")\nSNI: ${VMESS_WS_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
+
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-WS-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_WS_SNI}"
     LINK="$link_ipv4"
@@ -3087,7 +3274,7 @@ setup_vmess_ws_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-WS-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"ws","type":"none","host":"'"${VMESS_WS_SNI}"'","path":"'"${WS_PATH}"'","tls":"tls","sni":"'"${VMESS_WS_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_WS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3098,6 +3285,7 @@ setup_vmess_ws_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_WS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "VMess-WS-TLS 配置完成 (SNI: ${VMESS_WS_SNI})"
     save_links_to_files
@@ -3134,6 +3322,10 @@ setup_vmess_h2_tls() {
         print_info "随机SNI: ${VMESS_H2_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${VMESS_H2_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
 
@@ -3145,9 +3337,24 @@ setup_vmess_h2_tls() {
         print_info "随机 H2 Path: ${H2_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${VMESS_H2_SNI} 生成自签证书..."
-    gen_cert_for_sni "${VMESS_H2_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${VMESS_H2_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_H2_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        gen_cert_for_sni "${VMESS_H2_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_H2_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3164,12 +3371,7 @@ setup_vmess_h2_tls() {
     \"path\": \"${H2_PATH}\",
     \"headers\": {\"host\": \"${VMESS_H2_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${VMESS_H2_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${VMESS_H2_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3179,12 +3381,15 @@ setup_vmess_h2_tls() {
     fi
 
     PROTO="VMess-H2-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nH2 Path: ${H2_PATH}\n证书: 自签证书(${VMESS_H2_SNI})\nSNI: ${VMESS_H2_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nH2 Path: ${H2_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_H2_SNI})" || echo "自签证书(${VMESS_H2_SNI})")\nSNI: ${VMESS_H2_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
+
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-H2-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_H2_SNI}"
     LINK="$link_ipv4"
@@ -3193,7 +3398,7 @@ setup_vmess_h2_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-H2-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"h2","type":"none","host":"'"${VMESS_H2_SNI}"'","path":"'"${H2_PATH}"'","tls":"tls","sni":"'"${VMESS_H2_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_H2_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3204,6 +3409,7 @@ setup_vmess_h2_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_H2_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "VMess-H2-TLS 配置完成 (SNI: ${VMESS_H2_SNI})"
     save_links_to_files
@@ -3240,6 +3446,10 @@ setup_vmess_httpupgrade_tls() {
         print_info "随机SNI: ${VMESS_HU_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${VMESS_HU_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
 
@@ -3251,9 +3461,24 @@ setup_vmess_httpupgrade_tls() {
         print_info "随机 Path: ${HU_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${VMESS_HU_SNI} 生成自签证书..."
-    gen_cert_for_sni "${VMESS_HU_SNI}"
+    # 生成证书
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${VMESS_HU_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_HU_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        gen_cert_for_sni "${VMESS_HU_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${VMESS_HU_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3270,12 +3495,7 @@ setup_vmess_httpupgrade_tls() {
     \"path\": \"${HU_PATH}\",
     \"headers\": {\"host\": \"${VMESS_HU_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${VMESS_HU_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${VMESS_HU_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3285,12 +3505,15 @@ setup_vmess_httpupgrade_tls() {
     fi
 
     PROTO="VMess-HTTPUpgrade-TLS"
-    EXTRA_INFO="UUID: ${NODE_UUID}\nPath: ${HU_PATH}\n证书: 自签证书(${VMESS_HU_SNI})\nSNI: ${VMESS_HU_SNI}"
+    EXTRA_INFO="UUID: ${NODE_UUID}\nPath: ${HU_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${VMESS_HU_SNI})" || echo "自签证书(${VMESS_HU_SNI})")\nSNI: ${VMESS_HU_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure=',"allowInsecure":"1"'
+
     # IPv4 链接
-    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+    local vmess_json_ipv4='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-'"${SERVER_IP}"'","add":"'"${SERVER_IP}"'","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
     local link_ipv4="vmess://$(echo -n "$vmess_json_ipv4" | base64 -w0)"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${VMESS_HU_SNI}"
     LINK="$link_ipv4"
@@ -3299,7 +3522,7 @@ setup_vmess_httpupgrade_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"}'
+        local vmess_json_ipv6='{"v":"2","ps":"VMess-HTTPUpgrade-TLS-['"${SERVER_IPV6}"']","add":"['"${SERVER_IPV6}"']","port":"'"${PORT}"'","id":"'"${NODE_UUID}"'","aid":"0","net":"httpupgrade","type":"none","host":"'"${VMESS_HU_SNI}"'","path":"'"${HU_PATH}"'","tls":"tls","sni":"'"${VMESS_HU_SNI}"'"'"${allow_insecure}"'}'
         local link_ipv6="vmess://$(echo -n "$vmess_json_ipv6" | base64 -w0)"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${VMESS_HU_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${VMESS_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
@@ -3310,6 +3533,7 @@ setup_vmess_httpupgrade_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${VMESS_HU_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "VMess-HTTPUpgrade-TLS 配置完成 (SNI: ${VMESS_HU_SNI})"
     save_links_to_files
@@ -3346,12 +3570,32 @@ setup_trojan_tls() {
         print_info "随机SNI: ${TROJAN_TLS_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${TROJAN_TLS_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
 
-    # 生成自签证书
-    print_info "为 ${TROJAN_TLS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${TROJAN_TLS_SNI}"
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${TROJAN_TLS_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_TLS_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        # 生成自签证书
+        print_info "为 ${TROJAN_TLS_SNI} 生成自签证书..."
+        gen_cert_for_sni "${TROJAN_TLS_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_TLS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3363,12 +3607,7 @@ setup_trojan_tls() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"users\": [{\"password\": \"${NODE_TROJAN_PASSWORD}\"}],
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${TROJAN_TLS_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${TROJAN_TLS_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3378,12 +3617,15 @@ setup_trojan_tls() {
     fi
 
     PROTO="Trojan-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\n证书: 自签证书(${TROJAN_TLS_SNI})\nSNI: ${TROJAN_TLS_SNI}"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_TLS_SNI})" || echo "自签证书(${TROJAN_TLS_SNI})")\nSNI: ${TROJAN_TLS_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&insecure=1&allowInsecure=1"
+
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}&insecure=1&allowInsecure=1#Trojan-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}${allow_insecure}#Trojan-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_TLS_SNI}"
     LINK="$link_ipv4"
 
@@ -3391,7 +3633,7 @@ setup_trojan_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}&insecure=1&allowInsecure=1#Trojan-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?type=tcp&security=tls&sni=${TROJAN_TLS_SNI}${allow_insecure}#Trojan-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_TLS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_TLS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3401,6 +3643,7 @@ setup_trojan_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_TLS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "Trojan-TLS 配置完成 (SNI: ${TROJAN_TLS_SNI})"
     save_links_to_files
@@ -3437,6 +3680,10 @@ setup_trojan_ws_tls() {
         print_info "随机SNI: ${TROJAN_WS_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${TROJAN_WS_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
 
@@ -3448,9 +3695,25 @@ setup_trojan_ws_tls() {
         print_info "随机 WS Path: ${WS_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${TROJAN_WS_SNI} 生成自签证书..."
-    gen_cert_for_sni "${TROJAN_WS_SNI}"
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${TROJAN_WS_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_WS_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        # 生成自签证书
+        print_info "为 ${TROJAN_WS_SNI} 生成自签证书..."
+        gen_cert_for_sni "${TROJAN_WS_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_WS_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3468,12 +3731,7 @@ setup_trojan_ws_tls() {
     \"headers\": {\"host\": \"${TROJAN_WS_SNI}\"},
     \"early_data_header_name\": \"Sec-WebSocket-Protocol\"
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${TROJAN_WS_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${TROJAN_WS_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3483,12 +3741,15 @@ setup_trojan_ws_tls() {
     fi
 
     PROTO="Trojan-WS-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nWS Path: ${WS_PATH}\n证书: 自签证书(${TROJAN_WS_SNI})\nSNI: ${TROJAN_WS_SNI}"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nWS Path: ${WS_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_WS_SNI})" || echo "自签证书(${TROJAN_WS_SNI})")\nSNI: ${TROJAN_WS_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_WS_SNI}"
     LINK="$link_ipv4"
 
@@ -3496,7 +3757,7 @@ setup_trojan_ws_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}&allowInsecure=1#Trojan-WS-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=ws&host=${TROJAN_WS_SNI}&path=${WS_PATH}${allow_insecure}#Trojan-WS-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_WS_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_WS_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3506,6 +3767,7 @@ setup_trojan_ws_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_WS_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "Trojan-WS-TLS 配置完成 (SNI: ${TROJAN_WS_SNI})"
     save_links_to_files
@@ -3542,6 +3804,10 @@ setup_trojan_h2_tls() {
         print_info "随机SNI: ${TROJAN_H2_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${TROJAN_H2_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
 
@@ -3553,9 +3819,25 @@ setup_trojan_h2_tls() {
         print_info "随机 H2 Path: ${H2_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${TROJAN_H2_SNI} 生成自签证书..."
-    gen_cert_for_sni "${TROJAN_H2_SNI}"
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${TROJAN_H2_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_H2_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        # 生成自签证书
+        print_info "为 ${TROJAN_H2_SNI} 生成自签证书..."
+        gen_cert_for_sni "${TROJAN_H2_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_H2_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3572,12 +3854,7 @@ setup_trojan_h2_tls() {
     \"path\": \"${H2_PATH}\",
     \"headers\": {\"host\": \"${TROJAN_H2_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${TROJAN_H2_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${TROJAN_H2_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3587,12 +3864,15 @@ setup_trojan_h2_tls() {
     fi
 
     PROTO="Trojan-H2-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nH2 Path: ${H2_PATH}\n证书: 自签证书(${TROJAN_H2_SNI})\nSNI: ${TROJAN_H2_SNI}"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nH2 Path: ${H2_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_H2_SNI})" || echo "自签证书(${TROJAN_H2_SNI})")\nSNI: ${TROJAN_H2_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_H2_SNI}"
     LINK="$link_ipv4"
 
@@ -3600,7 +3880,7 @@ setup_trojan_h2_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}&allowInsecure=1#Trojan-H2-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=h2&host=${TROJAN_H2_SNI}&path=${H2_PATH}${allow_insecure}#Trojan-H2-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_H2_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_H2_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3610,6 +3890,7 @@ setup_trojan_h2_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_H2_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "Trojan-H2-TLS 配置完成 (SNI: ${TROJAN_H2_SNI})"
     save_links_to_files
@@ -3646,6 +3927,10 @@ setup_trojan_httpupgrade_tls() {
         print_info "随机SNI: ${TROJAN_HU_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${TROJAN_HU_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_TROJAN_PASSWORD=$(openssl rand -hex 16)
     print_info "节点密码: ${NODE_TROJAN_PASSWORD}"
 
@@ -3657,9 +3942,25 @@ setup_trojan_httpupgrade_tls() {
         print_info "随机 Path: ${HU_PATH}"
     fi
 
-    # 生成自签证书
-    print_info "为 ${TROJAN_HU_SNI} 生成自签证书..."
-    gen_cert_for_sni "${TROJAN_HU_SNI}"
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${TROJAN_HU_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_HU_SNI}\",
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        # 生成自签证书
+        print_info "为 ${TROJAN_HU_SNI} 生成自签证书..."
+        gen_cert_for_sni "${TROJAN_HU_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TROJAN_HU_SNI}\",
+    \"certificate_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3676,12 +3977,7 @@ setup_trojan_httpupgrade_tls() {
     \"path\": \"${HU_PATH}\",
     \"headers\": {\"host\": \"${TROJAN_HU_SNI}\"}
   },
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${TROJAN_HU_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${TROJAN_HU_SNI}/private.key\"
-  }
+  ${tls_config}
 }"
 
     if [[ -z "$INBOUNDS_JSON" ]]; then
@@ -3691,12 +3987,15 @@ setup_trojan_httpupgrade_tls() {
     fi
 
     PROTO="Trojan-HTTPUpgrade-TLS"
-    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nPath: ${HU_PATH}\n证书: 自签证书(${TROJAN_HU_SNI})\nSNI: ${TROJAN_HU_SNI}"
+    EXTRA_INFO="密码: ${NODE_TROJAN_PASSWORD}\nPath: ${HU_PATH}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME/Let's Encrypt(${TROJAN_HU_SNI})" || echo "自签证书(${TROJAN_HU_SNI})")\nSNI: ${TROJAN_HU_SNI}"
 
     CURRENT_NEW_LINKS=""
 
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&allowInsecure=1"
+
     # IPv4 链接
-    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
+    local link_ipv4="trojan://${NODE_TROJAN_PASSWORD}@${SERVER_IP}:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TROJAN_HU_SNI}"
     LINK="$link_ipv4"
 
@@ -3704,7 +4003,7 @@ setup_trojan_httpupgrade_tls() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}&allowInsecure=1#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
+        local link_ipv6="trojan://${NODE_TROJAN_PASSWORD}@[${SERVER_IPV6}]:${PORT}?encryption=none&security=tls&type=httpupgrade&host=${TROJAN_HU_SNI}&path=${HU_PATH}${allow_insecure}#Trojan-HTTPUpgrade-TLS-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TROJAN_HU_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TROJAN_HU_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3714,6 +4013,7 @@ setup_trojan_httpupgrade_tls() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TROJAN_HU_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
 
     print_success "Trojan-HTTPUpgrade-TLS 配置完成 (SNI: ${TROJAN_HU_SNI})"
     save_links_to_files
@@ -3750,6 +4050,10 @@ setup_tuic() {
         print_info "随机SNI: ${TUIC_SNI}"
     fi
 
+    # 证书模式选择
+    ask_cert_mode "${TUIC_SNI}"
+    local NODE_CERT_MODE="${ASK_CERT_MODE_RESULT}"
+
     local NODE_TUIC_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_TUIC_UUID}"
 
@@ -3776,9 +4080,26 @@ setup_tuic() {
     read -p "是否启用 0-RTT？(y/N): " ENABLE_ZERORTT
     ENABLE_ZERORTT=${ENABLE_ZERORTT:-N}
 
-    # 生成自签证书
-    print_info "为 ${TUIC_SNI} 生成自签证书..."
-    gen_cert_for_sni "${TUIC_SNI}"
+    # 证书生成
+    local tls_config=""
+    if [[ "${NODE_CERT_MODE}" == "acme" ]]; then
+        ACME_DOMAINS+=("${TUIC_SNI}")
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TUIC_SNI}\",
+    \"alpn\": [\"h3\"],
+    \"certificate_provider\": \"acme-le\"
+  }"
+    else
+        gen_cert_for_sni "${TUIC_SNI}"
+        tls_config="\"tls\": {
+    \"enabled\": true,
+    \"server_name\": \"${TUIC_SNI}\",
+    \"alpn\": [\"h3\"],
+    \"certificate_path\": \"${CERT_DIR}/${TUIC_SNI}/cert.pem\",
+    \"key_path\": \"${CERT_DIR}/${TUIC_SNI}/private.key\"
+  }"
+    fi
 
     print_info "生成配置文件..."
 
@@ -3796,13 +4117,7 @@ setup_tuic() {
   \"listen\": \"${listen_addr}\",
   \"listen_port\": ${PORT},
   \"users\": [{\"uuid\": \"${NODE_TUIC_UUID}\", \"password\": \"${NODE_TUIC_PASSWORD}\"}],
-  \"tls\": {
-    \"enabled\": true,
-    \"server_name\": \"${TUIC_SNI}\",
-    \"certificate_path\": \"${CERT_DIR}/${TUIC_SNI}/cert.pem\",
-    \"key_path\": \"${CERT_DIR}/${TUIC_SNI}/private.key\",
-    \"alpn\": [\"h3\"]
-  },
+  ${tls_config},
   \"congestion_control\": \"${CONGESTION}\"${zerortt_config}
 }"
 
@@ -3813,15 +4128,19 @@ setup_tuic() {
     fi
 
     PROTO="TUIC"
-    EXTRA_INFO="UUID: ${NODE_TUIC_UUID}\n密码: ${NODE_TUIC_PASSWORD}\n拥塞控制: ${CONGESTION}\n证书: 自签证书(${TUIC_SNI})\nSNI: ${TUIC_SNI}"
+    EXTRA_INFO="UUID: ${NODE_TUIC_UUID}\n密码: ${NODE_TUIC_PASSWORD}\n拥塞控制: ${CONGESTION}\n证书: $([[ "${NODE_CERT_MODE}" == "acme" ]] && echo "ACME证书(${TUIC_SNI})" || echo "自签证书(${TUIC_SNI})")\nSNI: ${TUIC_SNI}"
     if [[ "$ENABLE_ZERORTT" =~ ^[Yy]$ ]]; then
         EXTRA_INFO="${EXTRA_INFO}\n0-RTT: 已启用"
     fi
 
     CURRENT_NEW_LINKS=""
 
+    # 根据证书模式决定是否添加 insecure
+    local allow_insecure=""
+    [[ "${NODE_CERT_MODE}" == "selfsign" ]] && allow_insecure="&insecure=1&allowInsecure=1"
+
     # IPv4 链接
-    local link_ipv4="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@${SERVER_IP}:${PORT}?sni=${TUIC_SNI}&alpn=h3&insecure=1&allowInsecure=1&congestion_control=${CONGESTION}#TUIC-${SERVER_IP}"
+    local link_ipv4="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@${SERVER_IP}:${PORT}?sni=${TUIC_SNI}&alpn=h3${allow_insecure}&congestion_control=${CONGESTION}#TUIC-${SERVER_IP}"
     add_link "$link_ipv4" "${PROTO}" "$EXTRA_INFO" "${SERVER_IP}" "${PORT}" "${TUIC_SNI}"
     LINK="$link_ipv4"
 
@@ -3829,7 +4148,7 @@ setup_tuic() {
 
     # IPv6 链接
     if [[ -n "${SERVER_IPV6}" ]]; then
-        local link_ipv6="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@[${SERVER_IPV6}]:${PORT}?sni=${TUIC_SNI}&alpn=h3&insecure=1&allowInsecure=1&congestion_control=${CONGESTION}#TUIC-[${SERVER_IPV6}]"
+        local link_ipv6="tuic://${NODE_TUIC_UUID}:${NODE_TUIC_PASSWORD}@[${SERVER_IPV6}]:${PORT}?sni=${TUIC_SNI}&alpn=h3${allow_insecure}&congestion_control=${CONGESTION}#TUIC-[${SERVER_IPV6}]"
         add_link "$link_ipv6" "${PROTO}" "$EXTRA_INFO" "[${SERVER_IPV6}]" "${PORT}" "${TUIC_SNI}"
         CURRENT_NEW_LINKS="${CURRENT_NEW_LINKS}[${PROTO}] [${SERVER_IPV6}]:${PORT} (SNI: ${TUIC_SNI})\n${link_ipv6}\n----------------------------------------\n\n"
     fi
@@ -3839,7 +4158,8 @@ setup_tuic() {
     INBOUND_PROTOS+=("${PROTO}")
     INBOUND_SNIS+=("${TUIC_SNI}")
     INBOUND_RELAY_TAGS+=("direct")
-
+    INBOUND_CERT_MODES+=("${NODE_CERT_MODE}")
+    
     print_success "TUIC 配置完成 (SNI: ${TUIC_SNI})"
     save_links_to_files
 }
@@ -5290,10 +5610,21 @@ modify_vless_node() {
                         '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
                         "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 else
-                    jq --arg tag "$tag" --arg sni "$new_sni" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    gen_cert_for_sni "${new_sni}"
+                    # 检查节点是否使用 ACME 证书
+                    local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                    if [[ -n "$current_cert_provider" ]]; then
+                        # ACME 模式：只更新 server_name，不生成自签证书
+                        jq --arg tag "$tag" --arg sni "$new_sni" \
+                            '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                            "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                        ACME_DOMAINS+=("${new_sni}")
+                    else
+                        # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                        jq --arg tag "$tag" --arg sni "$new_sni" \
+                            '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                            "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                        gen_cert_for_sni "${new_sni}"
+                    fi
                 fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
@@ -5301,7 +5632,11 @@ modify_vless_node() {
                 if [[ $is_reality -eq 1 ]]; then
                     print_success "SNI 已修改为 ${new_sni}"
                 else
-                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                    if [[ -n "$current_cert_provider" ]]; then
+                        print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                    else
+                        print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                    fi
                 fi
                 ;;
             $path_num)
@@ -5483,14 +5818,29 @@ modify_vmess_node() {
                 if [[ -z "$new_sni" ]]; then
                     new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                gen_cert_for_sni "${new_sni}"
+                # 检查节点是否使用 ACME 证书
+                local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                if [[ -n "$current_cert_provider" ]]; then
+                    # ACME 模式：只更新 server_name，不生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    ACME_DOMAINS+=("${new_sni}")
+                else
+                    # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                if [[ -n "$current_cert_provider" ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
             $path_num)
                 echo -e "${YELLOW}新路径 (留空随机)${NC}"
@@ -5650,14 +6000,29 @@ modify_trojan_node() {
                 if [[ -z "$new_sni" ]]; then
                     new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                gen_cert_for_sni "${new_sni}"
+                # 检查节点是否使用 ACME 证书
+                local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                if [[ -n "$current_cert_provider" ]]; then
+                    # ACME 模式：只更新 server_name，不生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    ACME_DOMAINS+=("${new_sni}")
+                else
+                    # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                if [[ -n "$current_cert_provider" ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
             $path_num)
                 echo -e "${YELLOW}新路径 (留空随机)${NC}"
@@ -5780,14 +6145,29 @@ modify_hysteria2_node() {
                 if [[ -z "$new_sni" ]]; then
                     new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                gen_cert_for_sni "${new_sni}"
+                # 检查节点是否使用 ACME 证书
+                local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                if [[ -n "$current_cert_provider" ]]; then
+                    # ACME 模式：只更新 server_name，不生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    ACME_DOMAINS+=("${new_sni}")
+                else
+                    # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                if [[ -n "$current_cert_provider" ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
             3)
                 local new_password=$(openssl rand -hex 16)
@@ -5907,14 +6287,29 @@ modify_tuic_node() {
                 if [[ -z "$new_sni" ]]; then
                     new_sni=$(get_random_sni)
                 fi
-                jq --arg tag "$tag" --arg sni "$new_sni" \
-                    '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                    "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                gen_cert_for_sni "${new_sni}"
+                # 检查节点是否使用 ACME 证书
+                local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                if [[ -n "$current_cert_provider" ]]; then
+                    # ACME 模式：只更新 server_name，不生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    ACME_DOMAINS+=("${new_sni}")
+                else
+                    # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                    jq --arg tag "$tag" --arg sni "$new_sni" \
+                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                    gen_cert_for_sni "${new_sni}"
+                fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
                 config_changed=1
-                print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                if [[ -n "$current_cert_provider" ]]; then
+                    print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                else
+                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                fi
                 ;;
             3)
                 local new_uuid=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
@@ -6066,10 +6461,21 @@ modify_anytls_node() {
                         '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.reality.handshake.server = $sni)' \
                         "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
                 else
-                    jq --arg tag "$tag" --arg sni "$new_sni" \
-                        '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
-                        "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
-                    gen_cert_for_sni "${new_sni}"
+                    # 检查节点是否使用 ACME 证书
+                    local current_cert_provider=$(jq -r ".inbounds[] | select(.tag == \"$tag\") | .tls.certificate_provider // \"\"" "${CONFIG_FILE}" 2>/dev/null)
+                    if [[ -n "$current_cert_provider" ]]; then
+                        # ACME 模式：只更新 server_name，不生成自签证书
+                        jq --arg tag "$tag" --arg sni "$new_sni" \
+                            '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | del(.tls.certificate_path) | del(.tls.key_path))' \
+                            "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                        ACME_DOMAINS+=("${new_sni}")
+                    else
+                        # 自签模式：更新 server_name + 证书路径 + 生成自签证书
+                        jq --arg tag "$tag" --arg sni "$new_sni" \
+                            '(.inbounds[] | select(.tag == $tag)) |= (.tls.server_name = $sni | .tls.certificate_path = ($sni | "/etc/sing-box/certs/\(.)" + "/cert.pem") | .tls.key_path = ($sni | "/etc/sing-box/certs/\(.)" + "/private.key"))' \
+                            "${CONFIG_FILE}" > /tmp/config_tmp.json && mv /tmp/config_tmp.json "${CONFIG_FILE}"
+                        gen_cert_for_sni "${new_sni}"
+                    fi
                 fi
                 INBOUND_SNIS[$array_idx]="$new_sni"
                 current_sni="$new_sni"
@@ -6077,7 +6483,11 @@ modify_anytls_node() {
                 if [[ $is_reality -eq 1 ]]; then
                     print_success "SNI 已修改为 ${new_sni}，handshake.server 已同步更新"
                 else
-                    print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                    if [[ -n "$current_cert_provider" ]]; then
+                        print_success "SNI 已修改为 ${new_sni}，证书将通过 ACME 自动申请"
+                    else
+                        print_success "SNI 已修改为 ${new_sni}，证书已重新生成"
+                    fi
                 fi
                 ;;
             3)
@@ -6898,6 +7308,38 @@ generate_config() {
   }'
     fi
     
+    # 构建 certificate_providers（如果有 ACME 节点）
+    local cert_providers_json=""
+    if [[ ${#ACME_DOMAINS[@]} -gt 0 ]]; then
+        # 去重域名
+        local unique_domains=()
+        for d in "${ACME_DOMAINS[@]}"; do
+            local found=0
+            for ud in "${unique_domains[@]}"; do
+                [[ "$d" == "$ud" ]] && found=1 && break
+            done
+            [[ $found -eq 0 ]] && unique_domains+=("$d")
+        done
+        
+        local domains_array="["
+        for i in "${!unique_domains[@]}"; do
+            [[ $i -gt 0 ]] && domains_array+=", "
+            domains_array+="\"${unique_domains[$i]}\""
+        done
+        domains_array+="]"
+        
+        cert_providers_json="\"certificate_providers\": [
+    {
+      \"type\": \"acme\",
+      \"tag\": \"acme-le\",
+      \"domain\": ${domains_array},
+      \"email\": \"${ACME_EMAIL}\",
+      \"provider\": \"letsencrypt\"
+    }
+  ],"
+        print_info "ACME 证书提供商: Let's Encrypt (${#unique_domains[@]} 个域名)"
+    fi
+    
     cat > ${CONFIG_FILE} << EOFCONFIG
 {
   "log": {
@@ -6905,6 +7347,7 @@ generate_config() {
     "timestamp": true
   },
   "dns": ${dns_json},
+  ${cert_providers_json}
   "inbounds": [${INBOUNDS_JSON}],
   "outbounds": ${outbounds},
   "route": ${route_json}
