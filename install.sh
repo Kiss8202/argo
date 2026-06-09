@@ -1560,9 +1560,9 @@ setup_vless_reality() {
     read -p "Flow [${NODE_FLOW}]: " INPUT_FLOW
     NODE_FLOW=${INPUT_FLOW:-${NODE_FLOW}}
     
-    # Short ID（233boy 格式：空字符串）
-    local NODE_SHORT_ID=""
-    print_info "Short ID: (空)"
+    # Short ID（使用全局随机生成的 SHORT_ID）
+    local NODE_SHORT_ID="${SHORT_ID}"
+    print_info "Short ID: ${NODE_SHORT_ID}"
     
     print_info "生成配置文件..."
     
@@ -1580,7 +1580,7 @@ setup_vless_reality() {
       \"enabled\": true,
       \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
       \"private_key\": \"${REALITY_PRIVATE}\",
-      \"short_id\": [\"\"]
+      \"short_id\": [\"${NODE_SHORT_ID}\"]
     }
   }
 }"
@@ -2434,9 +2434,9 @@ setup_vless_http2_reality() {
     local NODE_UUID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
     print_info "节点 UUID: ${NODE_UUID}"
     
-    # Short ID（233boy 格式：空字符串）
-    local NODE_SHORT_ID=""
-    print_info "Short ID: (空)"
+    # Short ID（使用全局随机生成的 SHORT_ID）
+    local NODE_SHORT_ID="${SHORT_ID}"
+    print_info "Short ID: ${NODE_SHORT_ID}"
     
     print_info "生成配置文件..."
     
@@ -2458,7 +2458,7 @@ setup_vless_http2_reality() {
       \"enabled\": true,
       \"handshake\": {\"server\": \"${NODE_SNI}\", \"server_port\": 443},
       \"private_key\": \"${REALITY_PRIVATE}\",
-      \"short_id\": [\"\"]
+      \"short_id\": [\"${NODE_SHORT_ID}\"]
     }
   }
 }"
